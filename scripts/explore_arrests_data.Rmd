@@ -1,0 +1,688 @@
+---
+title: "data_exploration.Rmd"
+output: html_document
+date: "2026-03-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Immigration Data Exploration -- Arrests
+Exploring immigration data provided by https://deportationdata.org/
+
+Useful Links:
+  - https://deportationdata.org/docs/ice/codebook
+  - https://deportationdata.org/data/processed/ice.html 
+
+## init
+```{r,echo=FALSE}
+library(tidyverse)
+library(maps)
+library(janitor)
+library(here)
+library(arrow)
+library(readxl)
+source("fns.R")
+```
+
+
+## read data
+
+```{r}
+list.files(path=here("data/march-2026"),"parquet")
+```
+
+
+```{r}
+arrests_orig <- read_parquet(here("data/march-2026","arrests-latest.parquet"))
+
+```
+
+## high level exploration
+```{r}
+str(arrests_orig)
+```
+
+Basic cleaning
+```{r}
+arrests <- arrests_orig |> 
+  clean_strings() 
+
+
+```
+
+
+## uniqueness
+```{r}
+table(arrests$duplicate_likely)
+
+arrests |>
+  filter(duplicate_likely) |>
+  count(unique_identifier) |>
+  arrange(desc(n))
+
+```
+
+Spot check duplicates
+```{r}
+arrests |> filter(unique_identifier=="A5A2C5277ED163AAC4C41D7B796FFF7A9793B48E")
+```
+
+
+About 2.5% of rows are flagged as likely duplicates in original dataset, some of 
+these are exactly identical (aside from the original ID row). 
+
+### deduplication
+1. Remove exact duplicates
+2. For those remaining, deduplicate by unique ID and apprehension_date.
+  keep those with the most recent departure date
+  A. If there are ties, break by which has the most fields populated
+
+Exact duplicates
+```{r}
+arrests <- arrests |> 
+  distinct(pick(-row_original),.keep_all = TRUE)
+
+table(arrests$duplicate_likely)
+
+```
+```{r}
+# number of non-missing obs
+arrests$n_dat <- apply(arrests,1,function(x) sum(!is.na(x)))
+
+# deduplicate
+arrests <- arrests |>
+  arrange(desc(n_dat)) |>
+  distinct(unique_identifier,apprehension_date,.keep_all = TRUE)
+
+```
+
+
+After deduplication, distinct apprehensions for each individual, also tag the
+order/first/most recent apprehensions 
+
+TO DO: make into a function (need to figure out the name injection)
+```{r}
+arrests <- arrests |>
+  arrange(apprehension_date) |>
+  mutate(
+    n_appr=ifelse(!is.na(unique_identifier), n(), NA),
+    appr_ind = ifelse(!is.na(unique_identifier), row_number(), NA),
+    first_appr = ifelse(!is.na(unique_identifier), appr_ind==1, NA),
+    last_appr = ifelse(!is.na(unique_identifier), appr_ind==n_appr, NA),
+    .by=unique_identifier
+  )   
+  
+arrests |> datenum_summary(n_appr)
+
+```
+
+Tag first and most recent arrests
+```{r}
+arrests <- arrests |>
+  arrange(apprehension_date) |>
+  mutate(
+    appr_ind = row_number(),
+    first_appr = appr_ind==1,
+    last_appr = appr_ind==n_appr,
+    .by=unique_identifier
+  ) 
+
+```
+
+
+## variable checks
+### strings
+
+Check missingness
+```{r}
+arrests |> percent_missing(is.character)
+
+```
+
+Check common values
+```{r}
+char_vars <- names(select(arrests,is.character))
+top_vals <- lapply(char_vars, \(x) arrests |> most_common_vals(x))
+names(top_vals) <- char_vars
+top_df <- do.call("bind_rows",top_vals)
+top_df
+```
+
+Questions:
+* Which groups are being apprehended in "collateral" apprehensions? How do their
+movements across the system compare to others?
+* Which countries do people go to most frequently? Which countries often don't 
+return to place of origin, which receive those not from their place of origin?
+* Is there much variation in arrest method/criminality of arrests by AOR?
+* Which states have the most arrests relative to (immigrant) population
+
+### date values
+final_order and departed_date have outliers/potential errors. they are also
+missing in quite a few cases though I think this is expected b/c they don't 
+always occur
+```{r}
+datenum_summary(arrests,is.Date | is.POSIXct)
+
+```
+
+#### flag potential date errors
+
+Departure date should always be last (need to confirm this?)
+
+```{r}
+arrests <- arrests |>
+  mutate(dep_pre=departed_date < apprehension_date | 
+           departed_date<final_order_date) 
+
+arrests |> count(dep_pre)
+
+```
+
+
+
+#### order of/time between events
+
+```{r}
+arrests <- arrests |>
+  mutate(
+    ord_appr = apprehension_date-final_order_date,    
+    appr_dep = departed_date-apprehension_date,
+    ord_dep = departed_date-final_order_date
+  )
+
+arrests |>
+  summarise(
+    ord_appr_mean = mean(ord_appr,na.rm=TRUE),
+    ord_appr_median = median(ord_appr,na.rm=TRUE),
+    appr_dep_mean = mean(appr_dep,na.rm=TRUE),
+    appr_dep_median = median(appr_dep,na.rm=TRUE),
+    ord_dep_mean = mean(ord_dep,na.rm=TRUE),
+    ord_dep_median = median(ord_dep,na.rm=TRUE)
+  ) |> 
+  t()
+
+```
+
+Checking for missingness of apprehension/departure date. 
+
+First, missingness that seems due to data issues
+```{r}
+arrests |> 
+  filter(final_order_yes_no=="YES" & is.na(final_order_date))
+arrests |> 
+  filter(final_order_yes_no=="NO" & !is.na(final_order_date))
+
+arrests |> 
+  filter(is.na(departure_country) & !is.na(departed_date))
+arrests |> 
+  filter(!is.na(departure_country) & is.na(departed_date))
+
+
+```
+
+Generally, when a departure/final order variable indicates that the event should
+happen there is also a date for that event (and vice versa). The most common is
+missing departure country with departure date, but very few of those. For now
+just ignoring all of these cases.
+
+Now looking at other cases when apprehension/departure date is missing (assuming
+there's an administrative reason for the most part).
+
+
+Checking order of events by combinations of both any two and all three steps.
+
+```{r}
+arrests <- arrests |> 
+  mutate(
+    ord_appr_proc = case_when(
+      ord_appr > 0 ~ "ord-appr",
+      ord_appr < 0 ~ "appr-ord",
+      ord_appr == 0 ~ "same",
+      TRUE ~ NA
+    ),
+    appr_dep_proc = case_when(
+      appr_dep > 0 ~ "appr-dep",
+      appr_dep < 0 ~ "dep-appr",
+      appr_dep == 0 ~ "same",
+      TRUE ~ NA
+    ),
+    ord_dep_proc = case_when(
+      ord_dep > 0 ~ "ord-dep",
+      ord_dep < 0 ~ "dep-ord",
+      ord_dep == 0 ~ "same",
+      TRUE ~ NA
+    )
+  )
+
+arrests |> count(ord_appr_proc)
+arrests |> count(appr_dep_proc)
+arrests |> count(ord_dep_proc)
+```
+
+
+```{r}
+# three steps
+arrests <- arrests |> 
+  mutate(
+    proc_action3 = case_when(
+      is.na(apprehension_date) | 
+        is.na(final_order_date) | 
+        is.na(departed_date) ~ "<3 steps",
+      apprehension_date < final_order_date &
+        final_order_date < departed_date ~ "appr-ord-dep",
+      final_order_date < apprehension_date & 
+        apprehension_date < departed_date ~ "ord-appr-dep",
+      final_order_date < departed_date &  
+        departed_date < apprehension_date ~ "ord-dep-appr",
+      apprehension_date < departed_date & 
+      departed_date < final_order_date ~ "appr-dep-ord",
+      departed_date < final_order_date & 
+      final_order_date < apprehension_date ~ "dep-ord-appr",
+      departed_date < apprehension_date & 
+      apprehension_date < final_order_date ~ "dep-appr-ord",
+      apprehension_date < departed_date & 
+      departed_date == final_order_date ~ "appr-ordDep",
+      apprehension_date < departed_date & 
+      apprehension_date == final_order_date ~ "apprOrd-dep",
+      final_order_date < departed_date & 
+      apprehension_date == departed_date ~ "ord-apprDep",      
+      apprehension_date == departed_date &
+        departed_date < final_order_date ~ "apprDep-ord", 
+      apprehension_date == final_order_date &
+        departed_date < final_order_date ~ "dep-apprOrd", 
+      departed_date == final_order_date &
+        departed_date < apprehension_date ~ "depOrd-appr", 
+      apprehension_date == departed_date &
+        departed_date == final_order_date ~ "all-same", 
+      TRUE ~ "other"
+    )
+  )
+
+arrests |> 
+  count(proc_action3) |>
+  arrange(desc(n))
+
+```
+
+
+How do these trends look based on ICE group, criminality, program, etc?
+How have those trends changed over time?
+
+```{r}
+arrests |> 
+  filter(apprehension_date < as.Date("2025-01-20")) |>
+  count(ord_appr_proc,apprehension_criminality) |>
+  pivot_wider(names_from=apprehension_criminality,values_from = n)
+
+
+arrests |> 
+  filter(apprehension_date >= as.Date("2025-01-20")) |>
+  count(ord_appr_proc,apprehension_criminality) |>
+  pivot_wider(names_from=apprehension_criminality,values_from = n)
+
+
+```
+
+From a quick check, it looks like post-Trump2 (just using 01/20/2025 as the cutoff),
+there are more cases of individuals without criminal charges who have a deportation
+order and then were arrested compared to pre-Trump2
+
+
+#### Apprehension trends by date and time
+Get day of week and hour of apprehension
+```{r}
+arrests <- arrests |>
+  mutate(
+    apprehension_dow=wday(apprehension_date_time,label=TRUE),
+    apprehension_hour=hour(apprehension_date_time)
+  )
+
+
+```
+
+```{r}
+  arrests |> 
+  filter(apprehension_type=="COLLATERAL") |>
+  filter(apprehension_date>=as.Date("2025-01-01")) |>
+  count(apprehension_dow,apprehension_hour,apprehension_type) |>
+  ggplot(aes(x=apprehension_dow,y=factor(apprehension_hour))) +
+  geom_tile(aes(fill=n)) 
+
+  arrests |> 
+  filter(apprehension_type=="TARGETED") |>
+  filter(apprehension_date>=as.Date("2025-01-01")) |>
+  count(apprehension_dow,apprehension_hour,apprehension_type) |>
+  ggplot(aes(x=apprehension_dow,y=factor(apprehension_hour))) +
+  geom_tile(aes(fill=n)) 
+
+```
+Looks like collateral apprehensions occur at a slightly broader range of days/times
+while targeted apprehensions are generally during "business hours," with a pretty
+strong peak between 9 and 3 Tuesdays through Fridays
+
+
+### logical 
+
+```{r}
+logical_summary(arrests)
+```
+
+Only logical in original is from the duplicate likely flag, which is nearly 
+always populated (and rarely true)
+
+### integer
+Create age variables from YOB
+```{r}
+arrests |> datenum_summary(is.numeric)
+```
+
+Only numerics from original data are birth_year and row_number. from an initial 
+check, birth_year seems to have a reasonable range and very low missingness.
+
+Create a variable for age at apprehension (note that this won't be exact since
+we don't have full birthday).
+
+```{r}
+arrests <- arrests |>
+  mutate(appr_age=year(apprehension_date)-birth_year)
+
+arrests |> select(birth_year,apprehension_date,appr_age) |> head()
+
+```
+
+
+## demographics
+
+Main demo variables:
+  * citizenship_country
+  * apprehension_state
+  * gender
+  * appr_age
+
+### age and gender
+Create age bins
+```{r}
+# Consider making this function run from 
+arrests <- make_age_bins(arrests,col=appr_age)
+
+table(arrests$age_bin)
+arrests |> 
+  group_by(age_bin) |>
+  summarise(min(appr_age),max(appr_age),n())
+
+```
+
+
+Chart age and gender over time
+```{r}
+arrests |>
+  mutate(appr_year=year(apprehension_date)) |>
+  ggplot(aes(x=age_bin,fill=gender)) +
+  geom_bar() +
+  ggplot2::facet_grid(rows=vars(appr_year),scales="free_y")
+```
+Apprehensions have been of older groups, and more males in recent years. 
+Could this be because there is less border enforcement and more enforcement
+at workplaces, etc? Could potentially look at apprehension_method and 
+final_program to further disaggregate.
+
+
+Cross-tabs for age and gender
+```{r}
+arrests |> 
+  count(age_bin,gender) |>
+  pivot_wider(names_from=gender,values_from=n) |>
+  column_percents()
+
+
+arrests |> 
+  filter(apprehension_criminality=="3 OTHER IMMIGRATION VIOLATOR") |>
+  count(age_bin,gender) |>
+  pivot_wider(names_from=gender,values_from=n) |>
+  column_percents()
+
+
+```
+
+### geographies
+Create regions based on apprehension_state and country variables
+
+TO DO: Make these functions
+
+#### states
+state: base on census regions? or perhaps the modal apprehension_aor
+  look into location caveats on documentation
+
+```{r}
+state_aor_groups <- arrests |> 
+  group_by(apprehension_state,apprehension_aor) |>
+  summarise(n=n()) |> 
+  arrange(desc(n)) |>
+  mutate(ind = row_number()) |>
+  filter(ind==1) |>
+  ungroup() |>
+  arrange(apprehension_state)
+
+
+```
+
+Map results (may want to combine all AORs from the same states, probably 
+depends on case)
+```{r}
+state_aor_groups <- state_aor_groups |>
+  mutate(region=str_to_lower(apprehension_state))
+
+map_data("state") |> 
+  left_join(state_aor_groups) |>
+  arrange(order) |>
+  ggplot(aes(long, lat)) +
+    geom_polygon(aes(group = group, fill = apprehension_aor)) +
+    coord_map("albers",  lat0 = 45.5, lat1 = 29.5)
+```
+
+Add aor back to arrest data
+```{r}
+state_aor_groups <- state_aor_groups |> 
+  rename(aor_group=apprehension_aor) |>
+  select(apprehension_state, aor_group)
+
+arrests <- arrests |>
+  left_join(state_aor_groups) |>
+  relocate(aor_group,.after=apprehension_aor)
+
+```
+
+```{r}
+arrests |>
+  count(aor_group,apprehension_state)
+```
+
+
+#### countries
+UN Geogregions from https://unstats.un.org/unsd/methodology/m49/overview/ 
+NOTE: for now only keeping region, but some other categories could be
+interesting disaggregates (developing country statuses)
+```{r}
+un_geo_orig <- read_delim(here("data/other-data","UNSDMethodology.csv"),
+                     delim=";") |>
+  janitor::clean_names()
+un_geo <- un_geo_orig |>
+  mutate(country=str_to_upper(country_or_area)) |>
+  mutate(region=str_to_upper(
+    coalesce(intermediate_region_name,sub_region_name))) |>
+  select(country,region)
+
+un_geo 
+
+# manual matches 
+country_bridge <- read_csv(here("data/other-data",
+                                  "ICE_UN_country_manual_matches.csv")) 
+
+```
+
+Clean country names
+```{r}
+clean_country_names <- function(str) {
+  str |> 
+    str_remove_all(",.*$") |>
+    str_replace_all("[^[:alnum:]]", " ") |>
+    str_replace_all("  "," ") |>
+    str_trim()
+}
+
+un_geo <- un_geo |> 
+  rename(country_orig=country) |>
+  mutate(country=clean_country_names(country_orig),.after=country_orig) |>
+  left_join(country_bridge,by=(c("country"="un_country"))) |>
+  mutate(country=ifelse(!is.na(citizenship_country),citizenship_country,
+                        country)) |>
+  distinct(country,.keep_all = TRUE) |>
+  select(country,region)
+
+```
+
+
+
+```{r}
+if(!"citizenship_country_orig" %in% names(arrests)){
+  arrests <- arrests |> 
+    rename(citizenship_country_orig=citizenship_country) |>
+    mutate(citizenship_country=clean_country_names(citizenship_country_orig),
+                                                   .after=citizenship_country_orig) |>
+    rename(departure_country_orig=departure_country) |>
+    mutate(departure_country=clean_country_names(departure_country_orig),
+                                                   .after=departure_country_orig) 
+  
+  
+}
+```
+
+
+Join to arrests data
+```{r}
+arrests <- arrests |>
+  left_join(un_geo,by=join_by(citizenship_country==country)) |>
+  rename(citizenship_region=region) |>
+  relocate(citizenship_region,.after=citizenship_country) |> 
+  left_join(un_geo,by=join_by(departure_country==country)) |>
+  rename(departure_region=region) |>
+  relocate(departure_region,.after=departure_country)
+
+```
+
+Check missings for name differences
+
+(quite a bit of remapping to do, could potentially remove special characters and
+words after commas)
+
+NOTE: Make sure there are no duplicated names (.x and .y) 
+```{r}
+arrests |>
+  filter(is.na(citizenship_region) & !is.na(citizenship_country)) |>
+  distinct(citizenship_country) |>
+  arrange(citizenship_country) 
+```
+
+```{r}
+arrests |> 
+  count(citizenship_region,departure_region) |> 
+  arrange(desc(n))
+#arrests |> count(citizenship_region) |> arrange(desc(n))
+```
+
+For highly-represented countries (>10,000?), set to the country rather than region
+```{r}
+arrests |>
+  count(citizenship_country) |>
+  arrange(desc(n))
+
+use_countries <- arrests |>
+  count(citizenship_country) |>
+  filter(n>10000) |>
+  select(citizenship_country) |>
+  unlist()
+
+```
+
+
+```{r}
+arrests <- arrests |>
+  mutate(citizenship_region=ifelse(citizenship_country %in% use_countries,
+                                   citizenship_country,citizenship_region)) |>
+  mutate(departure_region=ifelse(departure_country %in% use_countries,
+                                   departure_country,departure_region))  
+```
+
+
+
+Which countries do people go to most frequently? Which countries often don't 
+return to place of origin, which receive those not from their place of origin?
+
+```{r}
+
+arrests |>
+  filter(!is.na(departure_country)) |>
+  filter(departed_date >= as.Date("2025-02-01")) |> 
+  add_count(citizenship_country,name="n_from") |>
+  add_count(departure_country,name="n_to") |>  
+  filter(n_from>1500 | n_to>1500) |>
+  filter(departure_country!=citizenship_country) |> 
+  group_by(citizenship_country,departure_country) |>
+  summarise(n=n()) |>
+  filter(n>25) |> 
+  ggplot(aes(departure_country, citizenship_country)) +
+    geom_tile(aes(fill = n)) +
+    scale_fill_gradient(low = "pink", high = "darkred")  +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+```
+
+
+Same analysis based on world region
+
+```{r}
+arrests |>
+  filter(!is.na(departure_country)) |>
+  filter(departed_date >= as.Date("2025-02-01")) |> 
+  add_count(citizenship_region,name="n_from") |>
+  add_count(departure_region,name="n_to") |>  
+  #filter(n_from>1500 | n_to>1500) |>
+  filter(departure_region!=citizenship_region) |> 
+  group_by(citizenship_region,departure_region) |>
+  summarise(n=n()) |>
+  filter(n>25) |> 
+  ggplot(aes(departure_region, citizenship_region)) +
+    geom_tile(aes(fill = n)) +
+    scale_fill_gradient(low = "pink", high = "darkred")  +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+```
+
+
+
+```{r}
+arrests |> 
+#  filter(str_detect(departure_country,"CHINA")) |>
+filter(citizenship_country=="CANADA" & departure_country!= "CANADA")
+
+# 5-year old canadian sent to romania? 
+  # 	326C3B206EF5C8160F3E964B3597ADDC725FD270
+
+# check others sent to romania on that day
+# TODO: check within a month or two as well as the exact date
+arrests |> 
+  filter(departure_country=="ROMANIA" & apprehension_date==as.Date("2025-09-11"))
+```
+
+
+## Export
+Save cleaned file with addl columns 
+```{r}
+write_parquet(arrests,here("data/cleaned","arrests.parquet"))
+
+```
+

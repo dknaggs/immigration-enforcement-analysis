@@ -1,0 +1,292 @@
+---
+title: "explore_detainers_data.Rmd"
+output: html_document
+date: "2026-03-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Immigration Data Exploration -- Detainers
+Exploring immigration data provided by https://deportationdata.org/
+
+Useful Links:
+  - https://deportationdata.org/docs/ice/codebook
+  - https://deportationdata.org/data/processed/ice.html 
+
+## init
+```{r,echo=FALSE}
+library(tidyverse)
+library(maps)
+library(janitor)
+library(here)
+library(arrow)
+library(readxl)
+source("fns.R")
+```
+
+
+## read data
+
+```{r}
+list.files(path=here("data/march-2026"),"parquet")
+```
+
+
+```{r}
+detainers_orig <- read_parquet(here("data/march-2026","detainers-latest.parquet"))
+
+```
+
+## high level exploration
+```{r}
+str(detainers_orig)
+```
+
+Basic cleaning
+```{r}
+detainers <- detainers_orig |> 
+  clean_strings() 
+
+
+```
+
+
+## uniqueness
+```{r}
+table(detainers$duplicate_likely)
+
+detainers |>
+  filter(duplicate_likely) |>
+  count(unique_identifier) |>
+  arrange(desc(n))
+
+```
+
+Spot check duplicates
+```{r}
+detainers |> filter(unique_identifier=="108F71C5B85009BA9550C4B79ADEFD4D6390EE69")
+```
+
+
+About 4.1% of rows are flagged as likely duplicates in original dataset, some of 
+these are exactly identical (aside from the original ID row). 
+
+### deduplication
+1. Remove exact duplicates
+2. For those remaining, deduplicate by unique id and detainer_prepare_date
+  A. If there are ties, break by which has the most fields populated
+
+Exact duplicates
+```{r}
+detainers <- detainers |> 
+  distinct(pick(-row_original),.keep_all = TRUE) 
+
+table(detainers$duplicate_likely)
+
+```
+
+```{r}
+detainers <- detainers |> 
+  group_by(unique_identifier) |>
+  mutate(n_obs=n())
+```
+
+
+```{r}
+detainers |>
+  filter(!duplicate_likely & n_obs > 1) |>
+  arrange(unique_identifier,detainer_prepare_date) |>
+  select(unique_identifier,detainer_prepare_date,detainer_type,detention_facility_code,
+         birth_year,citizenship_country,gender,msc_charge_date,msc_charge_code,
+         case_status,case_category,final_order_date,departed_date,illegal_reentry_yes_no,
+         resume_custody_yes_no,detainer_lift_reason)
+```
+
+
+
+```{r}
+# number of non-missing obs
+detainers$n_dat <- apply(detainers,1,function(x) sum(!is.na(x)))
+
+# deduplicate
+detainers <- detainers |>
+  arrange(desc(detainer_prepare_date),desc(n_dat)) |>
+  distinct(unique_identifier,detainer_prepare_date,.keep_all = TRUE)
+
+```
+
+
+
+```{r}
+detainers <- detainers |>
+  ungroup() |>
+  arrange(detainer_prepare_date) |>
+  mutate(
+    n_det=ifelse(!is.na(unique_identifier), n(), NA),
+    det_ind = ifelse(!is.na(unique_identifier), row_number(), NA),
+    first_det = ifelse(!is.na(unique_identifier), det_ind==1, NA),
+    last_det = ifelse(!is.na(unique_identifier), det_ind==n_det, NA),
+    .by=unique_identifier
+  )   
+  
+detainers |> datenum_summary(n_det)
+
+```
+
+
+
+## variable checks
+### strings
+
+Check missingness
+```{r}
+detainers |> percent_missing(is.character)
+
+```
+
+Check common values
+```{r}
+char_vars <- names(select(detainers,is.character))
+top_vals <- lapply(char_vars, \(x) detainers |> most_common_vals(x))
+names(top_vals) <- char_vars
+top_df <- do.call("bind_rows",top_vals)
+top_df
+```
+
+Questions:
+1. What are the criminal statuses of those with detainers?
+2. What factors are most likely to lead to a detainer?
+
+Look at detention sites in KS and MO
+```{r}
+detainers |>
+  filter(facility_state %in% c("MISSOURI","KANSAS")) |>
+  count(facility_state,detention_facility) |>
+  arrange(desc(n))
+
+```
+Quite a few in KS/MO area. Browsing the first few pages there is: 
+Wyandotte, Johnson, KCPD/KCK, Jackson,Independence, Clay, Belton
+
+What percent of KC arrests lead to detainers? What characteristics do they have? 
+
+
+### date values
+Key date seems to be `detainer_prepare_date` which is when the detainer (extension of jail stay) was issued. It is never missing, though there are some in the future (presumably
+a data issue but not sure).
+
+Date overview (in order I _think_ they would tend to go in, though am sure there 
+is a lot of variation):
+* entry_date
+* apprehension_date
+* msc_charge_date
+* msc_conviction_date 
+* detainer_prepare_date
+* final_order_date
+* departed_date
+
+
+```{r}
+datenum_summary(detainers,is.Date | is.POSIXct)
+
+```
+
+#### flag potential date errors
+Detainer date in the future
+```{r}
+detainers |>
+  filter(detainer_prepare_date >= as.Date("2026-03-11"))
+```
+
+Very few records from after date of data
+
+*TO DO* Order of events
+
+
+
+
+### logical 
+
+```{r}
+logical_summary(detainers)
+```
+
+Only logical in original is from the duplicate likely flag, worth noting that
+it's missing in 24% of cases
+
+### numeric
+
+
+```{r}
+detainers |> datenum_summary(is.numeric)
+```
+
+Might be more meaningful from detentions, but what factors lead to longer
+sentences? Particularly, what factors beyond criminality?
+Would need to look at coding MSC to do this
+
+Create a variable for age at apprehension (note that this won't be exact since
+we don't have full birthday).
+
+```{r}
+detainers <- detainers |>
+  mutate(det_age=year(detainer_prepare_date)-birth_year)
+
+detainers |> select(birth_year,detainer_prepare_date,det_age) |> head()
+
+```
+
+
+## demographics
+
+Main demo variables:
+  * citizenship_country
+  * apprehension_state
+  * gender
+  * det_age
+
+### age and gender
+Create age bins
+```{r}
+detainers <- make_age_bins(detainers,col=det_age)
+
+detainers |> 
+  group_by(age_bin) |>
+  summarise(min(det_age),max(det_age),n())
+
+```
+
+
+Chart age and gender over time
+```{r}
+detainers |>
+  mutate(det_year=year(detainer_prepare_date)) |>
+  ggplot(aes(x=age_bin,fill=gender)) +
+  geom_bar() +
+  ggplot2::facet_grid(rows=vars(det_year),scales="free_y")
+```
+Detainers are largely male, but have become more common for females in recent
+years (opposite trend with arrests)
+
+
+Cross-tabs for age and gender
+```{r}
+detainers |> 
+  count(age_bin,gender) |>
+  pivot_wider(names_from=gender,values_from=n) |>
+  column_percents()
+
+
+detainers |> 
+  filter(detainer_prepared_criminality=="3 OTHER IMMIGRATION VIOLATOR") |>
+  count(age_bin,gender) |>
+  pivot_wider(names_from=gender,values_from=n) |>
+  column_percents()
+
+
+```
+
+### geographies
+TO DO

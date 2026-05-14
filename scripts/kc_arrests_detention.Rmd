@@ -1,0 +1,341 @@
+---
+title: "KC Analysis"
+output: html_document
+date: "2026-04-04"
+---
+
+# Analysis of ICE data in Kansas City
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+High-level Plan
+1. Start with apprehension data and filter down based on toa_curent_duty_site
+  should compare with other indicators
+2. Left join on detention data
+3. Look at time/distance from apprehension to first detention location
+4. Start with detention data, and see who is booked into KC area facilities
+5. Check the overlap of this group with #2 
+(e.g. those with a first stay in KC but an apprehension elsewhere and vice versa)
+  See if documentation discusses why this could happen
+6. Replicate #3
+7. Perform other analyses flagged in scripts
+
+TODO: For Arrests, look at toa_current_duty_site (think this is a new column in March 26 data)
+TODO: Look at individuals in one dataset but not others, especially if it seems
+like they should be (eg everyone should have an apprehension)
+TODO: Keep ppl who have ever been apprehended in KC in addition to apprehensions 
+that occur in KC
+
+
+## Set up environment
+```{r,echo=FALSE}
+library(tidyverse)
+library(janitor)
+library(here)
+library(arrow)
+source("fns.R")
+```
+
+
+## Get Data
+TO DO: Get this from arrests_kc output from other script
+```{r}
+arrests <- read_parquet(here("data/cleaned","arrests.parquet"))
+
+```
+
+
+## Detentions 
+NOTE: Keeping a subset of columns, may want to add more at a later date.
+```{r}
+detention_orig <- read_parquet(here("data/march-2026",
+                                    "detention-stays-latest.parquet"),
+col_select = c(unique_identifier,n_stints,detention_facility_codes_all,
+stay_book_in_date_time,stay_book_out_date_time,entry_status,
+offense_ina_236c_yes_no,case_ina_236c_yes_no,msc_sentence_days,felon,
+bond_posted_date,bond_posted_amount,detainee_classification,final_charge,
+book_in_criminality,entry_date,book_in_site,
+detention_facility_code_first,detention_facility_first,
+book_in_date_time_first,book_in_date_time_last,book_in_aor,n_stays)
+) |>
+  clean_names() |>
+  clean_strings()
+
+```
+TO DO: add basic cleaning (or do that in another script and read in cleaned dataset)
+
+
+
+### Join Detentions to Arrests
+
+Check Uniqueness
+```{r}
+arrests_kc |> count(unique_identifier) |> filter(n>1)
+detention_orig |> count(unique_identifier) |> filter(n>1)
+```
+
+Since both arrests and detentions have multiple IDs, need to avoid a m:m join.
+
+
+#### Prepare for Joins
+Start by separating duplicated from joining unique arrests to unique detentions
+
+```{r}
+arrests_kc <- arrests_kc |> mutate(n_appr_kc=n(),
+                                   .by=unique_identifier)
+
+arrests_kc_ind <- arrests_kc |> filter(n_appr_kc==1)
+arrests_kc_mult <- arrests_kc |> filter(n_appr_kc>1)
+detention_ind <- detention_orig |> filter(n_stays==1)
+detention_mult <- detention_orig |> filter(n_stays>1)
+```
+
+
+```{r}
+nrow(arrests_kc)
+nrow(arrests_kc_ind)
+nrow(arrests_kc_mult)
+```
+
+Convenience functions for matching
+TO DO: Add a function to automatically confirm row counts match expected
+```{r}
+find_correct_detention <- function(arr_det_df,by){
+  arr_det_df <- arr_det_df |>
+  mutate(appr_det_diff=difftime(book_in_date_time_first,apprehension_date_time,
+                                units = "hours")) |>
+  filter(!appr_det_diff<(-24*7)) |>
+  filter(row_number()==1,.by={{by}}) |>
+  select(-appr_det_diff)
+}
+
+remove_matched <- function(df,found_vec){
+  df |> filter(!unique_identifier %in% found_vec)
+}
+
+
+```
+
+
+#### Unique Arrests
+First join those with a 1:1 relationship
+```{r}
+arr_det_ind <- inner_join(arrests_kc_ind,detention_ind,
+                          by="unique_identifier",relationship="one-to-one")
+arrests_kc_ind <- remove_matched(arrests_kc_ind,arr_det_ind$unique_identifier)  
+```
+
+```{r}
+nrow(arrests_kc_ind)
+nrow(arr_det_ind)
+```
+
+Now join unique arrests to non-unique detentions and keep the closest that isn't
+more than a week before the arrest.
+
+
+```{r}
+arr_det_ind_2 <- inner_join(arrests_kc_ind,detention_mult,
+                            by="unique_identifier",relationship="one-to-many")
+```
+
+
+```{r}
+arr_det_ind_2 <- find_correct_detention(arr_det_ind_2,unique_identifier)
+arrests_kc_ind <- remove_matched(arrests_kc_ind,arr_det_ind_2$unique_identifier)  
+
+```
+
+
+```{r}
+nrow(arr_det_ind_2)
+nrow(arrests_kc_ind)
+
+```
+Check if the remaining IDs in arrests_kc_ind appear in detention at all (they shouldn't)
+```{r}
+remaining_ids_ind <- arrests_kc_ind$unique_identifier
+remaining_ids_ind[remaining_ids_ind %in% detention_orig$unique_identifier]
+```
+Combine datasets
+```{r}
+arrests_kc_ind <- bind_rows(arrests_kc_ind,arr_det_ind,arr_det_ind_2)
+```
+
+```{r}
+rm(arr_det_ind,arr_det_ind_2)
+```
+
+
+#### Multiple Arrests
+
+##### One Detention
+Join multiple arrests to individual detentions
+```{r}
+arrests_kc_mult <- arrests_kc_mult |> 
+  mutate(appr_id = paste(unique_identifier,appr_ind,sep="_"))
+
+arr_det_mult <- inner_join(arrests_kc_mult,detention_ind,
+                           by="unique_identifier",relationship="many-to-one")
+
+```
+
+
+TO DO: Add this to fn to remove found IDs
+```{r}
+arr_det_mult_check <- find_correct_detention(arr_det_mult,unique_identifier)
+
+found_vec <- arr_det_mult_check$appr_id
+arrests_kc_mult <- arrests_kc_mult |> 
+  filter(!appr_id %in% found_vec) 
+
+```
+
+
+##### Multiple Detentions
+Join multiple arrests to multiple detentions, by rounded month of arrest.
+
+Remove very small number of records where this still yields multiple arrests.
+```{r}
+
+### add rounded event period
+unit <- "month"
+arrests_kc_mult <- arrests_kc_mult |>
+  mutate(event_rounded=round_date(apprehension_date_time,unit=unit))
+
+detention_mult <- detention_mult |>
+  mutate(event_rounded=round_date(book_in_date_time_first,unit=unit))
+
+### identify multiples
+has_mult_id_appr_rd <- arrests_kc_mult |>
+  count(unique_identifier,event_rounded) |>
+  filter(n>1) |>
+  select(unique_identifier) |>
+  unlist()
+
+### separate
+arrests_kc_mult_appr_rd <- arrests_kc_mult |>
+  filter(unique_identifier %in% has_mult_id_appr_rd)
+
+arrests_kc_mult <- arrests_kc_mult |>
+  filter(!unique_identifier %in% has_mult_id_appr_rd)
+
+```
+
+Perform join
+
+NOTE: Not sure this will always be 1-1. Need to consider it more.
+```{r}
+arr_det_mult2 <- inner_join(arrests_kc_mult,detention_mult,
+                      by=c("unique_identifier","event_rounded"),
+                      relationship="one-to-one")
+
+```
+
+Review matches
+```{r}
+arr_det_mult2 |>
+  select(unique_identifier,
+         apprehension_date_time,book_in_date_time_first) |>
+  arrange(unique_identifier,
+         apprehension_date_time,book_in_date_time_first)  
+```
+
+Identify still-unmatched arrests
+```{r}
+matched_mult <- arr_det_mult2$unique_identifier
+arrests_kc_mult <- arrests_kc_mult |>
+  filter(!unique_identifier %in% matched_mult)
+```
+
+
+
+#### Combine
+```{r}
+arrests_kc <- bind_rows(
+  arrests_kc_ind,
+  arrests_kc_mult,
+  arr_det_mult,
+  arr_det_mult2
+)
+
+# remove unneeded data
+rm(
+  arrests_kc_ind,
+  arrests_kc_mult,
+  detention_ind,
+  detention_mult,
+  arr_det_mult,
+  arr_det_mult2,
+  arr_det_mult_check,
+  arrests_kc_mult_appr_rd
+)
+```
+
+# Analysis 
+## Arrest-to-Detention Analysis
+Time from arrest to detention
+```{r}
+arrests_kc <- arrests_kc |>
+  mutate(
+    det_appr_hrs=as.numeric(difftime(
+      book_in_date_time_first,
+      apprehension_date_time,
+      units="hours")),
+    det_appr_days=as.numeric(difftime(
+      book_in_date_time_first,
+      apprehension_date_time,
+      units="days"))    
+  ) 
+```
+
+
+```{r}
+summary(arrests_kc$det_appr_hrs)
+
+arrests_kc |>
+  filter(det_appr_hrs>=-1 & det_appr_hrs<=1000) |>
+  ggplot(aes(x=det_appr_hrs)) +
+  geom_histogram()
+
+```
+
+```{r}
+arrests_kc |>
+  filter(det_appr_days>=1) |>
+  select(unique_identifier,apprehension_date_time,book_in_date_time_first,
+         apprehension_site_landmark,detention_facility_first
+        )
+```
+
+
+## Identify Detention Locations of KC Arrests
+```{r}
+kc_inds <- arrests_kc$unique_identifier
+detention_kc <- detention_orig |>
+  filter(unique_identifier %in% kc_inds)
+
+detention_kc |>
+  count(book_in_site) |>
+  arrange(desc(n))
+
+detention_kc |>
+  count(det) |>
+  arrange(desc(n))
+
+
+```
+
+
+
+
+# outcomes (in comparison to country?)
+
+COLUMNS NEEDED
+* LENGTH OF STAY 
+
+OTHER ANALYSES
+* Merge detainers and detention to see how many requests were approved by local law enforcement

@@ -1,0 +1,123 @@
+---
+title: "explore_detainers_data.Rmd"
+output: html_document
+date: "2026-03-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Immigration Detentions in KC Area
+Exploring immigration data provided by https://deportationdata.org/
+
+Useful Links:
+  - https://deportationdata.org/docs/ice/codebook
+  - https://deportationdata.org/data/processed/ice.html 
+
+## init
+```{r,echo=FALSE}
+library(tidyverse)
+library(maps)
+library(janitor)
+library(here)
+library(arrow)
+library(readxl)
+library(sf)
+library(sfarrow)
+source("fns.R")
+```
+
+
+## read data
+
+### detentions
+```{r}
+detention_orig <- read_parquet(here("data/march-2026",
+                                    "detention-stays-latest.parquet"))
+
+```
+
+
+### facility locations
+```{r}
+facilities_orig <- st_read_parquet(here("data/other-data",
+                                    "facilities-latest-sf.parquet"))
+```
+
+
+
+Detentions data is very large, so using a sample for exploration
+```{r}
+detention_orig <- detention_orig |> 
+  slice_sample(n=500000)
+```
+
+
+Basic cleaning
+```{r}
+detention <- detention_orig |> 
+  janitor::clean_names() |>
+  clean_strings() 
+
+facilities <- facilities_orig |> 
+  janitor::clean_names() |>
+  clean_strings()
+
+```
+
+
+For most uses of the facilities data here, not all of the columns are needed.
+```{r}
+facilities <- facilities |>
+  select(detention_facility_code,name,address,city,county,county_fips_code,
+         core_based_statistical_area,combined_statistical_area,state,zip)
+```
+
+Create a version of facilities without geometry
+```{r}
+facilities_nogeo <- facilities |> st_drop_geometry()
+```
+
+
+## Get site geography
+NOTE: Is initial detention a reasonable proxy, or should i look at book_in_site
+Think data documentation has some info on this
+
+Join facilities data to get location of initial detention
+
+```{r}
+facilities <- facilities |>
+  rename(cbsa=core_based_statistical_area) |>
+  rename(csa=combined_statistical_area) |>
+  rename_with(~paste0("detention_first_",.x),-detention_facility_code)
+```
+
+```{r}
+detention <- detention |>
+  left_join(facilities,by=c("detention_facility_code_first"="detention_facility_code"))
+```
+
+
+```{r}
+detention |>
+  filter(str_detect(detention_first_cbsa,"MO$|KS$")) |>
+  count(detention_first_cbsa)
+```
+```{r}
+detention |>
+#  filter(str_detect(detention_first_csa,"MO$|KS$")) |>
+  count(detention_first_csa)
+```
+
+```{r}
+facilities |>
+  filter(str_detect(detention_first_cbsa,"MO$|KS$")) |>
+  count(detention_first_cbsa)
+```
+
+
+
+## Export
+Save cleaned file with addl columns 
+

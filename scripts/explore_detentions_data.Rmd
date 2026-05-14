@@ -1,0 +1,375 @@
+---
+title: "explore_detainers_data.Rmd"
+output: html_document
+date: "2026-03-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Immigration Data Exploration -- Detainers
+Exploring immigration data provided by https://deportationdata.org/
+
+Useful Links:
+  - https://deportationdata.org/docs/ice/codebook
+  - https://deportationdata.org/data/processed/ice.html 
+
+## init
+```{r,echo=FALSE}
+library(tidyverse)
+library(maps)
+library(janitor)
+library(here)
+library(arrow)
+library(readxl)
+library(sf)
+library(sfarrow)
+source("fns.R")
+```
+
+
+## read data
+
+
+```{r}
+list.files(path=here("data/march-2026"),"parquet")
+```
+
+```{r}
+detention_orig <- read_parquet(here("data/march-2026",
+                                    "detention-stays-latest.parquet"))
+
+```
+
+
+### facility locations
+```{r}
+facilities_orig <- st_read_parquet(here("data/other-data",
+                                    "facilities-latest-sf.parquet"))
+```
+
+
+## high level exploration
+```{r}
+str(detention_orig)
+```
+
+```{r}
+#View(facilities_orig)
+```
+
+
+Detentions data is very large, so using a sample for exploration
+```{r}
+detention_orig <- detention_orig |> 
+  slice_sample(n=200000)
+```
+
+
+Basic cleaning
+```{r}
+detention <- detention_orig |> 
+  janitor::clean_names() |>
+  clean_strings() 
+
+facilities <- facilities_orig |> 
+  janitor::clean_names() |>
+  clean_strings()
+
+```
+
+
+For most uses of the facilities data here, not all of the columns are needed.
+```{r}
+facilities <- facilities |>
+  select(detention_facility_code,name,address,city,county,county_fips_code,
+         core_based_statistical_area,combined_statistical_area,state,zip)
+```
+
+Create a version of facilities without geometry
+```{r}
+facilities_nogeo <- facilities |> st_drop_geometry()
+```
+
+
+
+## uniqueness
+
+
+### deduplication
+TO DO: Check this more closely
+1. Remove exact duplicates
+2. For those remaining, deduplicate by unique id and detainer_prepare_date
+  A. If there are ties, break by which has the most fields populated
+
+Exact duplicates (don't seem to be any)
+```{r}
+detention <- detention |> 
+  distinct(pick(-stay_id),.keep_all = TRUE) 
+
+```
+
+```{r}
+detention <- detention |> 
+  group_by(stay_id) |>
+  mutate(n_obs=n())
+```
+
+
+```{r}
+#detainers |>
+#  filter(!duplicate_likely & n_obs > 1) |>
+#  arrange(unique_identifier,detainer_prepare_date) |>
+#  select(unique_identifier,detainer_prepare_date,detainer_type,detention_facility_code,
+#         birth_year,citizenship_country,gender,msc_charge_date,msc_charge_code,
+#         case_status,case_category,final_order_date,departed_date,illegal_reentry_yes_no,
+#         resume_custody_yes_no,detainer_lift_reason)
+```
+
+
+
+```{r}
+# number of non-missing obs
+#detention$n_dat <- apply(detention,1,function(x) sum(!is.na(x)))
+
+# deduplicate
+#detention <- detention |>
+#  arrange(desc(detention_prepare_date),desc(n_dat)) |>
+#  distinct(stay_id,detainer_prepare_date,.keep_all = TRUE)
+
+```
+
+
+Stats on detention counts
+```{r}
+detention <- detention |>
+  ungroup() |>
+  arrange(book_in_date_time_first) |>
+  mutate(
+    n_det=ifelse(!is.na(unique_identifier), n(), NA),
+    det_ind = ifelse(!is.na(unique_identifier), row_number(), NA),
+    first_det = ifelse(!is.na(unique_identifier), det_ind==1, NA),
+    last_det = ifelse(!is.na(unique_identifier), det_ind==n_det, NA),
+    .by=unique_identifier
+  )   
+  
+detention |> datenum_summary(n_det)
+
+```
+
+### facilities
+```{r}
+facilities_nogeo |> 
+  count(detention_facility_code) |>
+  filter(n>1)
+```
+
+
+## variable checks
+### strings
+
+Check missingness
+```{r}
+detention |> percent_missing(is.character)
+
+```
+
+Check common values
+```{r}
+char_vars <- names(select(detention,is.character))
+top_vals <- lapply(char_vars, \(x) detention |> most_common_vals(x))
+names(top_vals) <- char_vars
+top_df <- do.call("bind_rows",top_vals)
+top_df
+```
+
+Notes:
+1. Lots of variables with criminality information
+
+### date values
+Key date seems to be `book_in_date_time`,
+
+
+```{r}
+datenum_summary(detention,is.Date | is.POSIXct)
+
+```
+
+This doesn't have apprehension date. It would be interesting to see if there are
+any gaps.
+
+#### flag potential date errors
+TO DO
+
+### logical 
+
+```{r}
+logical_summary(detention)
+```
+
+All logicals are from self-generated columns
+
+### numeric
+
+```{r}
+detention |> datenum_summary(is.numeric) |> round(1)
+```
+
+Very high amount of missingness, it may not actually be plausible to do much with these.
+There are also several variables with a max of repeated 9s. It seems like these may indicate missingness (or some sort of data error). 
+
+Checking frequency
+```{r}
+detention |> filter(initial_bond_set_amount==999999) |> nrow()
+detention |> filter(msc_sentence_years==999) |> nrow()
+detention |> filter(msc_sentence_months==999) |> nrow()
+```
+
+Based on how infrequent they are, going to set them to NA.
+```{r}
+detention <- detention |> mutate(
+  initial_bond_set_amount = replace_values(initial_bond_set_amount, 999999~NA),
+  msc_sentence_years = replace_values(msc_sentence_years, 999~NA),  
+  msc_sentence_months = replace_values(msc_sentence_months, 999~NA)
+)
+```
+
+```{r}
+detention |> datenum_summary(is.numeric) |> round(1)
+```
+
+Potential questions (though missingness makes this harder)
+What factors lead to longer sentences? 
+Particularly, what factors beyond criminality?
+Would need to look at coding MSC to do this
+
+Create a variable for age at detention (note that this won't be exact since
+we don't have full birthday).
+
+```{r}
+detention <- detention |>
+  mutate(det_age=year(book_in_date_time_first)-birth_year)
+
+
+```
+
+
+## demographics
+
+Main demo variables:
+  * citizenship_country/birth_country
+  * gender
+  * race
+  * det_age
+  * location of first detention
+
+### age and gender
+Create age bins
+```{r}
+detention <- make_age_bins(detention,col=det_age)
+
+detention |> 
+  group_by(age_bin) |>
+  summarise(min(det_age),max(det_age),n())
+
+```
+
+
+Chart age and gender over time
+```{r}
+detention |>
+  mutate(det_year=year(book_in_date_time_first)) |>
+  filter(det_year>=2022) |>
+  ggplot(aes(x=age_bin,fill=gender)) +
+  geom_bar() +
+  ggplot2::facet_grid(rows=vars(det_year),scales="free_y")
+```
+As with all datasets, detentions are largely male. As with arrests they have 
+become less common for females in recent years (opposite trend with detainers).
+
+
+
+Cross-tabs for age and gender
+```{r}
+detention |> 
+  count(age_bin,gender) |>
+  pivot_wider(names_from=gender,values_from=n) |>
+  column_percents()
+
+
+detention |> 
+  filter(book_in_criminality=="3 OTHER IMMIGRATION VIOLATOR") |>
+  count(age_bin,gender) |>
+  pivot_wider(names_from=gender,values_from=n) |>
+  column_percents()
+
+
+```
+
+### race
+Set Unknown race to NA
+```{r}
+detention <- detention |>
+  mutate(race = replace_values(race, "UNKNOWN"~NA))
+```
+
+```{r}
+detention |>
+  count(race,ethnicity) |>
+  arrange(desc(n))
+```
+
+
+
+### geographies
+NOTE: Is initial detention a reasonable proxy, or should i look at book_in_site
+Think data documentation has some info on this
+
+Join facilities data to get location of initial detention
+
+```{r}
+facilities <- facilities |>
+  rename(cbsa=core_based_statistical_area) |>
+  rename(csa=combined_statistical_area) |>
+  rename_with(~paste0("detention_first_",.x),-detention_facility_code)
+```
+
+```{r}
+detention <- detention |>
+  left_join(facilities,by=c("detention_facility_code_first"="detention_facility_code"))
+```
+
+
+```{r}
+detention |>
+  filter(str_detect(detention_first_cbsa,"MO$|KS$")) |>
+  count(detention_first_cbsa)
+```
+```{r}
+detention |>
+#  filter(str_detect(detention_first_csa,"MO$|KS$")) |>
+  count(detention_first_csa)
+```
+
+```{r}
+facilities |>
+  filter(str_detect(detention_first_cbsa,"MO$|KS$")) |>
+  count(detention_first_cbsa)
+```
+
+
+## conditions of detention
+TO DO
+Levels of Criminality, case status/category,
+
+
+## Export
+Save cleaned files  
+```{r}
+write_parquet(facilities,here("data/cleaned","facilities_sf.parquet"))
+write_parquet(facilities_nogeo,here("data/cleaned","facilities_list.parquet"))
+
+```
+
+
