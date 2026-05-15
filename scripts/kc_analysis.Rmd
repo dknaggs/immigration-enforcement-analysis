@@ -6,7 +6,6 @@ date: "2026-04-04"
 
 # Analysis of ICE data in Kansas City
 
-
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
@@ -23,12 +22,13 @@ High-level Plan
 6. Replicate #3
 7. Perform other analyses flagged in scripts
 
-TODO: For Arrests, look at toa_current_duty_site (think this is a new column in March 26 data)
-TODO: Look at individuals in one dataset but not others, especially if it seems
-like they should be (eg everyone should have an apprehension)
-TODO: Keep ppl who have ever been apprehended in KC in addition to apprehensions 
-that occur in KC
 
+TODO:
+1. split out KC identification notebook
+Consider:
+2. create notebook for summary (demographics, timeline, apprehension types, day and hr trends)
+3. Create notebook for criminality
+4. Create notebook for tactics (apprehension types, day and hr trends)
 
 ## Set up environment
 ```{r,echo=FALSE}
@@ -284,6 +284,9 @@ arrests_kc |>
 ```
 
 ## Criminality
+
+### Overall criminality
+Trend of arrests on people convicted of a crime
 ```{r}
 arrests_kc |>
   ggplot(aes(x=apprehension_month,fill=apprehension_criminality)) +
@@ -291,6 +294,66 @@ arrests_kc |>
 
 ```
 
+### Severity 
+For those convicted of a crime, severity of the crime by Case Threat Level. Per the Deportation Data Project,
+potentially based on criteria from a [2011 ICE Memo](https://www.ice.gov/doclib/news/releases/2011/110302washingtondc.pdf)
+
+* Level 1: Aggravated felony
+* Level 2: Felony or at least 3 misdemeanors
+* Level 3: Misdemeanors
+
+```{r}
+arrests_kc |> count(case_threat_level)
+```
+
+
+Combining criminality and severity 
+```{r}
+crim_levels <- 5:0
+crim_labels <- c(
+  "No Criminal Charges",
+  "Criminal Charges, No Convictions",
+  "Conviction: 1-2 Misdemeanors",
+  "Conviction: Felony/3 or More Misdemeanors",    
+  "Conviction: Aggravated Felony",
+  "Conviction: Unknown Severity"
+)
+
+
+arrests_kc <- arrests_kc |> 
+  mutate(crim_summ=
+    case_when(
+      is.na(apprehension_criminality) ~ NA,
+      apprehension_criminality == "3 OTHER IMMIGRATION VIOLATOR" ~ 5,
+      apprehension_criminality == "2 PENDING CRIMINAL CHARGES" ~ 4,
+      case_threat_level==3 ~ 3,
+      case_threat_level==2 ~ 2,    
+      case_threat_level==1 ~ 1,
+      TRUE ~ 0
+    )
+  )
+
+arrests_kc <- arrests_kc |>
+  mutate(crim_summ=factor(crim_summ,levels = crim_levels,labels=crim_labels))
+
+```
+
+
+
+
+```{r}
+arrests_kc |>
+  filter(!is.na(crim_summ)) |>
+  ggplot(aes(x=apprehension_month,fill=crim_summ)) +
+  geom_bar(stat="count")
+
+```
+
+
+
+### Changes in current administration
+
+Criminality
 ```{r}
 arrests_kc |>
   count(post_0125,apprehension_criminality) |>
@@ -300,19 +363,54 @@ arrests_kc |>
 ```
 
 
+Threat level
+TO DO: Make this look nice with gt 
+```{r}
+arrests_kc |> 
+  filter(!is.na(case_threat_level)) |>
+  count(post_0125,apprehension_month,crim_summ) |>
+  group_by(post_0125,crim_summ) |>
+  summarise(n_avg=mean(n)) |>
+  pivot_wider(names_from=post_0125,values_from=n_avg) |>
+  mutate(change=100*(`TRUE`-`FALSE`)/`FALSE`)
+  
+
+```
+
+
+
+
+
+
+
 ## Trends by day of week and time of day
-The below looks only at arrests within communities.
+
+Focusing on arrests within communities.
 
 ```{r}
+
+hr_bins <- seq(0,23,2)
+hr_labs <- c(
+  "12 AM - 2 AM",
+  "2 AM - 4 AM",
+  "4 AM - 6 AM",
+  "6 AM - 8 AM",
+  "8 AM - 10 AM",
+  "10 AM - 12 PM",
+  "12 PM - 2 PM",
+  "2 PM - 4 PM",
+  "4 PM - 6 PM",
+  "6 PM - 8 PM",
+  "10 PM - 12 AM"
+  )
 arrests_kc <- arrests_kc |>
   mutate(
     apprehension_dow=wday(apprehension_date_time,label=TRUE),
     apprehension_hour=hour(apprehension_date_time),
     apprehension_block=cut(
       apprehension_hour,
-      breaks=6,
-#      breaks=age_bins,
-#      labels=age_labs,
+      breaks=hr_bins,
+      labels=hr_labs,
       right=TRUE,
       include.lowest=TRUE,
       dig.lab=0,
@@ -323,26 +421,23 @@ arrests_kc <- arrests_kc |>
 
 ```
 
+TO DO:
+Title
+Theme (remove axis lines and maybe use something else)
+Note (caveat about not a prediction)
+Wrap legend title
 
-TO DO: Make these nice labels
 ```{r}
-  arrests |>
-  mutate(
-    apprehension_hour=hour(apprehension_date_time),
-    apprehension_block=cut(
-      apprehension_hour,
-      breaks=12,
-      right=TRUE,
-      include.lowest=TRUE,
-      dig.lab=0,
-      ordered_result=TRUE
-    )
-  ) |>
+  arrests_kc |>
   filter(apprehension_method %in% c("NON-CUSTODIAL ARREST","LOCATED")) |>
-  filter(apprehension_date>=as.Date("2025-01-01")) |>
-  count(apprehension_dow,apprehension_block) |>
+  filter(post_0125) |>
+  count(post_0125,apprehension_dow,apprehension_block) |>
   ggplot(aes(x=apprehension_dow,y=apprehension_block)) +
-  geom_tile(aes(fill=n)) 
+    geom_tile(aes(fill=n)) +
+    scale_fill_continuous(low="grey95",high="red") +
+    labs(x="Day of Week",y="Hour",fill="Number of Apprehensions") +
+    theme_minimal()
+  
 
 
 ```
@@ -357,11 +452,10 @@ arrests_kc |>
   count(citizenship_region) |>
   arrange(desc(n))
 
-
 ```
 
 
-
+(maybe remove the below)
 Individuals with a different `departure_country` vs `citizenship_country`
 ```{r}
 arrests_kc |>
@@ -407,6 +501,16 @@ TO DO: Make a fn for comparing variables pre and post 012025.
   should be like the above with a change column added
 TO DO: Update label for post-012025
 
-# outcomes (in comparison to country?)
+### Case Statuses
+```{r}
+arrests_kc |> 
+  count(case_status) 
+```
+
+```{r}
+arrests_kc |>
+  count(case_threat_level)
+```
+
 
 
