@@ -29,10 +29,6 @@ source("fns.R")
 
 ## read data
 
-```{r}
-list.files(path=here("data/march-2026"),"parquet")
-```
-
 
 ```{r}
 arrests_orig <- read_parquet(here("data/march-2026","arrests-latest.parquet"))
@@ -48,8 +44,6 @@ Basic cleaning
 ```{r}
 arrests <- arrests_orig |> 
   clean_strings() 
-
-
 ```
 
 
@@ -169,7 +163,8 @@ datenum_summary(arrests,is.Date | is.POSIXct)
 
 #### flag potential date errors
 
-Departure date should always be last (need to confirm this?)
+I believe that departure date should always be last, though there may be on-the-ground
+reasons why this isn't the case.
 
 ```{r}
 arrests <- arrests |>
@@ -180,7 +175,21 @@ arrests |> count(dep_pre)
 
 ```
 
-
+#### flag pre/post
+Adding a flag for pre/post Jan 2025 (i.e. the start of Trump's second term).
+Starting at Feb 1, which is slightly after the inauguration. A different date
+may be more meaningful depending on when policies were enacted on the ground.
+```{r}
+arrests <- arrests |>
+  mutate(post_0125=ifelse(apprehension_date>=as.Date("2025-02-01"),TRUE,FALSE),
+    post_0125_f=factor(post_0125, levels=c(TRUE,FALSE),
+                        labels=c("After Jan 2025","Before Jan 2025")
+    )
+#    post_0125_lab=ifelse(post_0125,"")
+  ) 
+  
+summary(arrests$post_0125)
+```
 
 #### order of/time between events
 
@@ -614,7 +623,6 @@ arrests <- arrests |>
   mutate(departure_region=ifelse(departure_country %in% use_countries,
                                    departure_country,departure_region))  
 ```
-
 
 
 Which countries do people go to most frequently? Which countries often don't 
