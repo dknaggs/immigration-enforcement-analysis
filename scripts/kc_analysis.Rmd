@@ -1,14 +1,19 @@
 ---
-title: "KC Analysis"
+title: "KC Analysis-Overview"
 output: html_document
 date: "2026-04-04"
 ---
 
-# Analysis of ICE data in Kansas City
+TO DO: Run everything with the likely flag
+
+# High Level Analysis of ICE data in Kansas City
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
+
+NOTE: mark as preliminary due to lack of definitiveness in current duty site
+
 
 High-level Plan
 1. Start with apprehension data and filter down based on toa_curent_duty_site
@@ -33,218 +38,144 @@ Consider:
 ## Set up environment
 ```{r,echo=FALSE}
 library(tidyverse)
-library(janitor)
+library(ggrepel)
 library(here)
 library(arrow)
 source("fns.R")
+```
+
+Repeated plot elements
+```{r}
+theme_set(theme_bw())
+inaug_line <- geom_vline(xintercept = as.Date("2025-01-20"), 
+                         color="darkblue", size=.75)
+
+inaug_text <- annotate("text",label="Trump's Second Inauguration",
+#           x=as.Date("2025-06-28"),y=10,size=3) + # bottom right
+           x=as.Date("2024-08-01"),y=180,size=3)  # top left
 ```
 
 
 ## Get Data
 
 ```{r}
-arrests <- read_parquet(here("data/cleaned","arrests.parquet"))
+arrests_kc <- read_parquet(here("data/cleaned","arrests_kc.parquet"))
 
 ```
-
-Adding a flag for pre/post Jan 2025
-```{r}
-arrests <- arrests |>
-  mutate(post_0125=apprehension_date>=as.Date("2025-01-01"))
-  
-```
-
-
-## Filter for Kansas City Data
-
-Check if there could be KC arrests with the state marked (incorrectly) as neither
-KS or MO
-
-```{r}
-arrests <- arrests |>
-  mutate(kc_duty_site=str_detect(toa_current_duty_site,"KANSAS") & 
-           str_detect(toa_current_duty_site,"MO"))
-
-```
-
-```{r}
-sum(arrests$kc_duty_site & 
-      !(arrests$apprehension_state=="MISSOURI" | 
-          arrests$apprehension_state == "KANSAS"),na.rm=TRUE)
-
-arrests |> 
-  filter(kc_duty_site &
-           !(arrests$apprehension_state=="MISSOURI" | 
-               arrests$apprehension_state == "KANSAS")) |>
-  select(toa_current_duty_site,apprehension_site_landmark,
-         apprehension_state,apprehension_date)
-```
-
-Very few potential diagreements and almost all of them seem like they are out of
-the region. For now going to start with KS and MO as a prerequisite for 
-being considered a KC arrest.
-
-
-Checking via both `apprehension_site_landmark` and `toa_current_duty_site`. The latter
-seems much cleaner but it is also a new variable without much documentation.
-
-Start by looking at only KS and MO state
-
-```{r}
-arrests_moks <- arrests |> 
-  filter(apprehension_state=="MISSOURI" | apprehension_state == "KANSAS")
-
-```
-
-
-Checking values in each column
-```{r}
-
-arrests_moks |> count(apprehension_site_landmark) |> arrange(desc(n))
-arrests_moks |> count(toa_current_duty_site) |> arrange(desc(n))
-
-```
-
-### `apprehension_site_landmark`
-Tagging specific mentions of KS and MO counties in the KC metro within `apprehension_site_landmark`
-```{r}
-metro_keywords <- c("CLAY","JACKSON","DOUGLAS","LEAVENWORTH","GRANDVIEW",
-                    "INDEPENDENCE","JACKSON","JOHNSON","KANSAS CITY",
-                    "PLATTE","WYANDOTTE","CASS")
-arrests_moks <- arrests_moks |> 
-  mutate(kc_landmark=str_detect(apprehension_site_landmark,
-                                paste0(metro_keywords,collapse="|")) &
-  !(str_detect(apprehension_site_landmark,"JOHNSON") & 
-    apprehension_state=="MISSOURI") &
-  !(str_detect(apprehension_site_landmark,"JACKSON") & 
-           apprehension_state=="KANSAS")
-  )
-  
-
-
-```
-
-
-### `toa_current_duty_site`
-```{r}
-arrests_moks <- arrests_moks |>
-  mutate(kc_duty_site=str_detect(toa_current_duty_site,"KANSAS") & 
-           str_detect(toa_current_duty_site,"MO"))
-```
-
-
-### Compare results
-Overlap/differences 
-```{r}
-# KC by landmark but not duty site 
-sum(arrests_moks$kc_landmark & !arrests_moks$kc_duty_site,na.rm=TRUE)
-
-# KC by duty site but not landmark
-sum(!arrests_moks$kc_landmark & arrests_moks$kc_duty_site,na.rm = TRUE)
-
-# KC by both
-sum(arrests_moks$kc_landmark & arrests_moks$kc_duty_site,na.rm = TRUE)
-
-# KC by neither
-sum(!arrests_moks$kc_landmark & !arrests_moks$kc_duty_site,na.rm = TRUE)
-
-```
-
-Values for duty site in kc but landmark not
-```{r}
-arrests_moks |> 
-  filter(kc_duty_site & !kc_landmark) |>
-  select(toa_current_duty_site,apprehension_site_landmark,
-         apprehension_state,apprehension_date,apprehension_method) 
-
-arrests_moks |> 
-  filter(kc_duty_site & !kc_landmark) |>
-  count(toa_current_duty_site)
-
-arrests_moks |> 
-  filter(kc_duty_site & !kc_landmark) |>
-  count(apprehension_site_landmark) |>
-  arrange(desc(n))
-
-
-
-```
-
-If there is a KC `toa_current_duty_site`, going to flag as potentially in KC if 
-`apprehension_site_landmark` is "KAN GENERAL AREA, NON-SPECIFIC" and otherwise
-definitely not in KC.
-
-
-Values for landmark in kc but duty site not
-```{r}
-arrests_moks |> 
-  filter(!kc_duty_site & kc_landmark) |>
-  select(toa_current_duty_site,apprehension_site_landmark,
-         apprehension_state,apprehension_date,apprehension_method) 
-
-arrests_moks |> 
-  filter(!kc_duty_site & kc_landmark) |>
-  count(toa_current_duty_site)
-
-arrests_moks |> 
-  filter(!kc_duty_site & kc_landmark) |>
-  count(apprehension_site_landmark) |>
-  arrange(desc(n))
-
-
-
-```
-
-All of these seem to be outside of the KC metro
-
-### Final Assignment of KC Arrests
-```{r}
-arrests_kc <- arrests_moks |>
-  filter(
-    (kc_duty_site & kc_landmark) |  
-  (kc_duty_site & 
-     (
-       apprehension_site_landmark=="KAN GENERAL AREA, NON-SPECIFIC" |
-         is.na(apprehension_site_landmark)
-      )
-  )) |>
-  mutate(unclear= (kc_duty_site & 
-     (
-       apprehension_site_landmark=="KAN GENERAL AREA, NON-SPECIFIC" |
-         is.na(apprehension_site_landmark)
-      )
-  ))
-```
-
-Also going to make a dataset of arrests of indviduals who have ever been apprehended in kc
-(currently this only adds a handful).
-
-```{r}
-#kc_inds <- arrests_kc$unique_identifier
-#arrests_kc_ever <- arrests |>
-#  filter(unique_identifier %in% kc_inds)
-
-```
-
-
 
 
 # Analysis 
 
-## Number of arrests over time
+## Overview
+
+### Total Arrests
+
 ```{r}
-arrests_kc <- arrests_kc |>
-  mutate(apprehension_month = floor_date(apprehension_date,unit="months")) 
-
+# removing partial month of March 2026
 arrests_kc |>
+  filter(apprehension_month!=as.Date("2026-03-01")) |>
   ggplot(aes(x=apprehension_month)) +
-  geom_line(stat="count")
+  inaug_line + 
+  inaug_text + 
+#  geom_vline(xintercept = as.Date("2025-01-20"), color="darkblue", size=.75) +
+#  annotate("text",label="Trump's Second Inauguration",
+#           x=as.Date("2025-06-28"),y=10,size=3) + # bottom right
+#           x=as.Date("2024-08-01"),y=180,size=3) + # top left
+  geom_line(stat="count") +
+  geom_point(stat="count") +
+  geom_text_repel(aes(label = after_stat(count)), 
+                  stat = "count", hjust = 0.5,size=2.75)+ #,
+#                  linewidth=0,fill="grey80",alpha=.5) + # code for geom_label
+  labs(title="Number of ICE Arrests in the Kansas City Area",
+       x="Month",y="Number of Apprehensions") +
+  scale_x_date(date_breaks = "6 months", date_labels =  "%b %y") +
+  ylim(0,NA)
 
+```
+### Demographics
+
+#### Place of Citizenship
+Apprehensions from citizens of most countries have increased at least somewhat 
+since Jan 2025, though there are some exceptions (e.g., Nicaragua and Cuba).
+Countries with the notably large increases include Honduras and Venezuela.
+
+I don't know enough about changing immigration patterns and policies to know the
+exact causes of these changes.
+
+```{r}
+arrests_kc |> 
+  comp_table(citizenship_region) |>
+  make_output_cols() |>
+  add_before_after_change()
 
 ```
 
+#### People Deported to Countries of which They Aren't Citizens   
+For arrested individuals who are later deported, this table shows how many
+individuals were sent to different country than the one for which they have
+citizenship.
 
-## Apprehension Types
+This is quite rare for Kansas City arrests, though it has increased since Jan 
+2025, with Mexico being the most common departure country by far.
+```{r}
+arrests_kc |>
+  filter(!is.na(departure_country) & departure_country!=citizenship_country) |>
+  filter(!post_0125) |>
+  count(citizenship_country,departure_country,name="number_of_people") |>
+  arrange(desc(number_of_people)) |>
+  make_output_cols()
+
+arrests_kc |>
+  filter(!is.na(departure_country) & departure_country!=citizenship_country) |>
+  filter(post_0125) |>
+  count(citizenship_country,departure_country,name="number_of_people") |>
+  arrange(desc(number_of_people)) |>
+  make_output_cols()
+
+```
+
+#### Percent of Arrests by Age and Gender
+
+Each column in this table shows the percent each age group makes up of all
+arrests within a gender. For example, 6-10 year olds make up 4.4% of all female
+arrests.
+
+For both men and women, people in their 20s and 30s make up over half of all
+arrests.
+```{r}
+arrests_kc |>
+  count(age_bin,gender) |>
+  pivot_wider(names_from=gender,values_from=n) |>
+  column_percents() |>
+  make_output_cols() |>
+  select(-`Unknown`)
+```
+
+
+This table shows changes in the number of arrests by age. Arrests of people under 
+18 have (maybe surprisingly) decreased since Jan 2025. However, 18-21 year olds
+are the age group with the largest increase. 
+```{r}
+arrests_kc |>
+  comp_table(age_bin,sort_by_var = TRUE) |>
+  make_output_cols() |>
+  add_before_after_change() 
+
+```
+
+Looking at the number of arrests by gender shows that arrests of men have driven
+the increase since Jan 2025.
+```{r}
+arrests_kc |>
+  comp_table(gender,sort_by_var = TRUE) |>
+  make_output_cols() |>
+  add_before_after_change() 
+
+```
+
+## Apprehension Tactics
+### Places of Apprehensions
+Looking at all values of the `apprehension_method` column.
 ```{r}
 arrests_kc |> 
   count(apprehension_method) |> 
@@ -253,7 +184,7 @@ arrests_kc |>
 ```
 
 
-Trying to group apprehension methods
+Trying to group apprehension methods to get place information
 ```{r}
 arrests_kc <- arrests_kc |>
   mutate(
@@ -279,9 +210,103 @@ arrests_kc |>
 
 ```{r}
 arrests_kc |>
+  filter(apprehension_date!=as.Date("2026-02-01")) |>
   ggplot(aes(x=apprehension_month,fill=apprehension_summ)) +
-  geom_bar(stat="count")
+  geom_bar(stat="count") +
+  inaug_line + 
+  inaug_text 
+  
+
+
+
 ```
+
+### Apprehension Programs
+
+```{r}
+arrests_kc |>
+  count(post_0125_f,final_program) |>
+  arrange(desc(post_0125_f)) |>
+  pivot_wider(names_from=post_0125_f,values_from = n) |>
+  column_percents()
+```
+
+
+### Days with the most apprehensions
+```{r}
+arrests_kc |>
+  count(apprehension_date) |>
+  arrange(desc(n))
+```
+
+
+```{r}
+arrests_kc |>
+  filter(apprehension_date == as.Date("2025-06-03") | 
+           apprehension_date == as.Date("2025-06-04"))
+```
+
+
+### Trends by day of week and time of day
+
+Focusing on arrests within communities.
+
+```{r}
+
+hr_bins <- seq(0,23,2)
+hr_labs <- c(
+  "12 AM - 2 AM",
+  "2 AM - 4 AM",
+  "4 AM - 6 AM",
+  "6 AM - 8 AM",
+  "8 AM - 10 AM",
+  "10 AM - 12 PM",
+  "12 PM - 2 PM",
+  "2 PM - 4 PM",
+  "4 PM - 6 PM",
+  "6 PM - 8 PM",
+  "10 PM - 12 AM"
+  )
+arrests_kc <- arrests_kc |>
+  mutate(
+    apprehension_dow=wday(apprehension_date_time,label=TRUE),
+    apprehension_hour=hour(apprehension_date_time),
+    apprehension_block=cut(
+      apprehension_hour,
+      breaks=hr_bins,
+      labels=hr_labs,
+      right=TRUE,
+      include.lowest=TRUE,
+      dig.lab=0,
+      ordered_result=TRUE
+    )
+  )
+
+
+```
+
+TO DO:
+Title
+Theme (remove axis lines and maybe use something else)
+Note (caveat about not a prediction)
+Wrap legend title
+
+```{r}
+  arrests_kc |>
+  filter(apprehension_method %in% c("NON-CUSTODIAL ARREST","LOCATED")) |>
+  filter(post_0125) |>
+  count(post_0125,apprehension_dow,apprehension_block) |>
+  ggplot(aes(x=apprehension_dow,y=apprehension_block)) +
+    geom_tile(aes(fill=n)) +
+    scale_fill_continuous(low="grey95",high="red") +
+    labs(x="Day of Week",y="Hour",fill="Number of Apprehensions") 
+  
+
+
+```
+
+
+
 
 ## Criminality
 
@@ -290,7 +315,8 @@ Trend of arrests on people convicted of a crime
 ```{r}
 arrests_kc |>
   ggplot(aes(x=apprehension_month,fill=apprehension_criminality)) +
-  geom_bar(stat="count")
+  geom_bar(stat="count") 
+
 
 ```
 
@@ -347,6 +373,11 @@ arrests_kc |>
   ggplot(aes(x=apprehension_month,fill=crim_summ)) +
   geom_bar(stat="count")
 
+arrests_kc |>
+  filter(!is.na(crim_summ)) |>
+  ggplot(aes(x=apprehension_month,fill=crim_summ)) +
+  geom_bar(stat="count")
+
 ```
 
 
@@ -364,142 +395,101 @@ arrests_kc |>
 
 
 Threat level
-TO DO: Make this look nice with gt 
 ```{r}
+
+crim_levels <- 5:0
+crim_labels <- c(
+  "No Criminal Charges",
+  "Criminal Charges, No Convictions",
+  "Conviction: 1-2 Misdemeanors",
+  "Conviction: Felony/3 or More Misdemeanors",    
+  "Conviction: Aggravated Felony",
+  "Conviction: Unknown Severity"
+)
+
 arrests_kc |> 
+  mutate(crim_summ=
+    case_when(
+      is.na(apprehension_criminality) ~ NA,
+      apprehension_criminality == "3 OTHER IMMIGRATION VIOLATOR" ~ 5,
+      apprehension_criminality == "2 PENDING CRIMINAL CHARGES" ~ 4,
+      case_threat_level==3 ~ 3,
+      case_threat_level==2 ~ 2,    
+      case_threat_level==1 ~ 1,
+      TRUE ~ 0
+    )
+  ) |>
+  mutate(crim_summ=factor(crim_summ,levels = crim_levels,labels=crim_labels)) |>
+  mutate(apprehension_month = floor_date(apprehension_date,unit="months")) |>
   filter(!is.na(case_threat_level)) |>
   count(post_0125,apprehension_month,crim_summ) |>
   group_by(post_0125,crim_summ) |>
   summarise(n_avg=mean(n)) |>
   pivot_wider(names_from=post_0125,values_from=n_avg) |>
-  mutate(change=100*(`TRUE`-`FALSE`)/`FALSE`)
-  
-
-```
-
-
-
-
-
-
-
-## Trends by day of week and time of day
-
-Focusing on arrests within communities.
-
-```{r}
-
-hr_bins <- seq(0,23,2)
-hr_labs <- c(
-  "12 AM - 2 AM",
-  "2 AM - 4 AM",
-  "4 AM - 6 AM",
-  "6 AM - 8 AM",
-  "8 AM - 10 AM",
-  "10 AM - 12 PM",
-  "12 PM - 2 PM",
-  "2 PM - 4 PM",
-  "4 PM - 6 PM",
-  "6 PM - 8 PM",
-  "10 PM - 12 AM"
-  )
-arrests_kc <- arrests_kc |>
   mutate(
-    apprehension_dow=wday(apprehension_date_time,label=TRUE),
-    apprehension_hour=hour(apprehension_date_time),
-    apprehension_block=cut(
-      apprehension_hour,
-      breaks=hr_bins,
-      labels=hr_labs,
-      right=TRUE,
-      include.lowest=TRUE,
-      dig.lab=0,
-      ordered_result=TRUE
-    )
+    change=`TRUE`-`FALSE`,
+    pct_change=100*(`TRUE`-`FALSE`)/`FALSE`
   )
 
-
-```
-
-TO DO:
-Title
-Theme (remove axis lines and maybe use something else)
-Note (caveat about not a prediction)
-Wrap legend title
-
-```{r}
-  arrests_kc |>
-  filter(apprehension_method %in% c("NON-CUSTODIAL ARREST","LOCATED")) |>
-  filter(post_0125) |>
-  count(post_0125,apprehension_dow,apprehension_block) |>
-  ggplot(aes(x=apprehension_dow,y=apprehension_block)) +
-    geom_tile(aes(fill=n)) +
-    scale_fill_continuous(low="grey95",high="red") +
-    labs(x="Day of Week",y="Hour",fill="Number of Apprehensions") +
-    theme_minimal()
+arrests_kc |> 
+  filter(!likely) |>
+  mutate(crim_summ=
+    case_when(
+      is.na(apprehension_criminality) ~ NA,
+      apprehension_criminality == "3 OTHER IMMIGRATION VIOLATOR" ~ 5,
+      apprehension_criminality == "2 PENDING CRIMINAL CHARGES" ~ 4,
+      case_threat_level==3 ~ 3,
+      case_threat_level==2 ~ 2,    
+      case_threat_level==1 ~ 1,
+      TRUE ~ 0
+    )
+  ) |>
+  mutate(crim_summ=factor(crim_summ,levels = crim_levels,labels=crim_labels)) |>
+  mutate(apprehension_month = floor_date(apprehension_date,unit="months")) |>
+  filter(!is.na(case_threat_level)) |>
+  count(post_0125,apprehension_month,crim_summ) |>
+  group_by(post_0125,crim_summ) |>
+  summarise(n_avg=mean(n)) |>
+  pivot_wider(names_from=post_0125,values_from=n_avg) |>
+  mutate(
+    change=`TRUE`-`FALSE`,
+    pct_change=100*(`TRUE`-`FALSE`)/`FALSE`
+  )
   
 
 
-```
 
-
-## By Demographics
-
-### Place of Citizenship
-Overall totals
-```{r}
-arrests_kc |>
-  count(citizenship_region) |>
-  arrange(desc(n))
-
-```
-
-
-(maybe remove the below)
-Individuals with a different `departure_country` vs `citizenship_country`
-```{r}
-arrests_kc |>
-  filter(!is.na(departure_country) & departure_country!=citizenship_country) |>
-  filter(!post_0125) |>
-  count(citizenship_country,departure_country) |>
-  arrange(desc(n))
-
-arrests_kc |>
-  filter(!is.na(departure_country) & departure_country!=citizenship_country) |>
-  filter(post_0125) |>
-  count(citizenship_country,departure_country) |>
-  arrange(desc(n))
+arrests_kc |> 
+  mutate(crim_summ=
+    case_when(
+      is.na(apprehension_criminality) ~ NA,
+      apprehension_criminality == "3 OTHER IMMIGRATION VIOLATOR" ~ 5,
+      apprehension_criminality == "2 PENDING CRIMINAL CHARGES" ~ 4,
+      case_threat_level==3 ~ 3,
+      case_threat_level==2 ~ 2,    
+      case_threat_level==1 ~ 1,
+      TRUE ~ 0
+    )
+  ) |>
+  mutate(crim_summ=factor(crim_summ,levels = crim_levels,labels=crim_labels)) |>
+  mutate(apprehension_month = floor_date(apprehension_date,unit="months")) |>
+  filter(!is.na(case_threat_level)) |>
+  count(post_0125_f,apprehension_month,crim_summ) |>
+  group_by(post_0125_F,crim_summ) |>
+  summarise(n_avg=mean(n)) |>
+  pivot_wider(names_from=post_0125,values_from=n_avg) |>
+  mutate(
+    change=`TRUE`-`FALSE`,
+    pct_change=100*(`TRUE`-`FALSE`)/`FALSE`
+  )
+  
+  
 
 ```
 
-### Age and Gender
-```{r}
-arrests_kc |>
-  count(age_bin,gender) |>
-  pivot_wider(names_from=gender,values_from=n) |>
-  column_percents()
-```
+NOTE: huge increase in Criminal Charges, No Convictions could have something to do with the way
+KC cases are identified
 
-```{r}
-arrests_kc |>
-  count(age_bin,post_0125) |>
-  pivot_wider(names_from=post_0125,values_from=n) |>
-  column_percents() 
-
-```
-
-
-```{r}
-arrests_kc |>
-  count(gender,post_0125) |>
-  pivot_wider(names_from=post_0125,values_from=n) |>
-  column_percents() 
-
-```
-
-TO DO: Make a fn for comparing variables pre and post 012025. 
-  should be like the above with a change column added
-TO DO: Update label for post-012025
 
 ### Case Statuses
 ```{r}
