@@ -161,6 +161,7 @@ datenum_summary(arrests,is.Date | is.POSIXct)
 
 ```
 
+
 #### flag potential date errors
 
 I believe that departure date should always be last, though there may be on-the-ground
@@ -182,10 +183,10 @@ may be more meaningful depending on when policies were enacted on the ground.
 ```{r}
 arrests <- arrests |>
   mutate(post_0125=ifelse(apprehension_date>=as.Date("2025-02-01"),TRUE,FALSE),
-    post_0125_f=factor(post_0125, levels=c(TRUE,FALSE),
-                        labels=c("After Jan 2025","Before Jan 2025")
+    post_0125_f=factor(post_0125, levels=c(FALSE,TRUE),
+                        labels=c("Before Jan 2025","After Jan 2025"),
+                       ordered = TRUE
     )
-#    post_0125_lab=ifelse(post_0125,"")
   ) 
   
 summary(arrests$post_0125)
@@ -338,12 +339,11 @@ From a quick check, it looks like post-Trump2 (just using 01/20/2025 as the cuto
 there are more cases of individuals without criminal charges who have a deportation
 order and then were arrested compared to pre-Trump2
 
-
-#### Apprehension trends by date and time
-Get day of week and hour of apprehension
+#### Add columns for date summaries
 ```{r}
 arrests <- arrests |>
   mutate(
+    apprehension_month = floor_date(apprehension_date,unit="months"),
     apprehension_dow=wday(apprehension_date_time,label=TRUE),
     apprehension_hour=hour(apprehension_date_time)
   )
@@ -351,6 +351,8 @@ arrests <- arrests |>
 
 ```
 
+
+#### apprehension trends by date and time
 ```{r}
   arrests |> 
   filter(apprehension_type=="COLLATERAL") |>
