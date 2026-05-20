@@ -88,11 +88,35 @@ make_age_bins <- function(df,col,age_bins=std_age_bins){
     )
 }
 
-comp_table <- function(df,var,by=post_0125_f){
-  df |>
+comp_table <- function(df,var,by=post_0125_f,sort_by_var=FALSE){
+  # makes a table showing the counts of `var` pivoted by `by` 
+  # if sort_by_var=TRUE, the table will be sorted by the values in var. 
+  # Otherwise, it will sort by overall frequency
+  tbl <- df |>
     count({{by}},{{var}}) |> 
     arrange(desc(n)) |>
-    pivot_wider(names_from={{by}},values_from=n,names_sort = TRUE)
+    pivot_wider(names_from={{by}},values_from=n,values_fill = 0,
+                names_sort = TRUE)
+  
+  if(sort_by_var){
+    tbl |>
+      arrange({{var}})
+  } else{
+    tbl
+  }
 }
 
+make_output_cols <- function(df){
+  # convenience function to make column titles nicer
+  rename_with(df,.fn=~ str_to_title(str_replace_all(.x,"_"," ")))
+}
 
+add_before_after_change <- function(df){
+  # adds a percent change column to tables comparing a variable before vs 
+  # after Jan 2020
+  df |> mutate(
+    `Percent Change`=round(100*(
+      (`After Jan 2025`-`Before Jan 2025`)/`Before Jan 2025`),
+      1)
+  )
+}
