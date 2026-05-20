@@ -63,7 +63,7 @@ column_percents <- function(df) {
   # convenience function to show the percent each observation makes of all
   # columns in df
   df |> 
-    mutate(across(is.numeric,~round(100*.x/sum(.x,na.rm=TRUE),1)))
+    mutate(across(where(is.numeric),~round(100*.x/sum(.x,na.rm=TRUE),1)))
 }
 
 make_age_bins <- function(df,col,age_bins=std_age_bins){
@@ -88,6 +88,11 @@ make_age_bins <- function(df,col,age_bins=std_age_bins){
     )
 }
 
+comp_table <- function(df,var,by=post_0125_f){
+  df |>
+    count({{by}},{{var}}) |> 
+    arrange(desc(n)) |>
+    pivot_wider(names_from={{by}},values_from=n,names_sort = TRUE)
+}
 
-  
 
