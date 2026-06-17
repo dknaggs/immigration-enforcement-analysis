@@ -1,0 +1,311 @@
+---
+title: "Get KC Apprehensions"
+output: html_document
+date: "June 2026"
+author: "Dylan Knaggs"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    code_folding: hide
+---
+
+# Identifying Apprehensions in Kansas City
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Set up environment
+```{r,echo=FALSE}
+library(tidyverse)
+library(janitor)
+library(here)
+library(arrow)
+library(gt)
+source("fns.R")
+```
+
+
+## Get Data
+```{r}
+arrests <- read_parquet(here("data/cleaned","arrests.parquet"))
+```
+
+## Initial Location Checks
+Per data documentation from the Immigration Data Project and review, the main indicators 
+of apprehension location seem to be `toa_current_duty_site` and 
+`apprehension_site_landmark`. Checking values of each.
+
+### `toa_current_duty_site`
+```{r}
+arrests |>
+  count(toa_current_duty_site)
+
+```
+
+### `apprehension_site_landmark`
+```{r}
+arrests |>
+  count(apprehension_site_landmark)
+``` 
+
+There are a huge number of values. Checking the more common ones.
+
+```{r}
+arrests |>
+  count(apprehension_site_landmark) |>
+  arrange(desc(n)) |>
+  head(1000) |>
+  arrange(apprehension_site_landmark)
+
+```
+
+
+While it is a new variable (as of March 2026 release) without documentation, 
+`toa_current_duty_site` seems much cleaner, with only a few values that seem to
+indicate KC. Using as an initial proxy.
+```{r}
+arrests <- arrests |>
+  mutate(kc_duty_site=str_detect(toa_current_duty_site,"KANSAS") & 
+           str_detect(toa_current_duty_site,"MO"))
+```
+
+
+## Statewide Checks
+
+### KC `current_duty_site`, outside MO/KS 
+
+Starting by looking at all KS and MO arrests (based on `apprehension_state`), and 
+checking the agreement between state and `current_duty_site`.
+
+```{r}
+# Total count
+sum(arrests$kc_duty_site & 
+      !(arrests$apprehension_state=="MISSOURI" | 
+          arrests$apprehension_state == "KANSAS"),na.rm=TRUE)
+
+# View cases
+arrests |> 
+  filter(kc_duty_site &
+           !(arrests$apprehension_state=="MISSOURI" | 
+               arrests$apprehension_state == "KANSAS")) |>
+  select(toa_current_duty_site,apprehension_site_landmark,
+         apprehension_state,apprehension_date)
+```
+
+Very few disagreements and almost all of them seem like they are out of
+the region. For now going to start with KS and MO as a prerequisite for 
+being considered a KC arrest.
+
+### Other `current_duty_site` in MO/KS
+Also looking at values of `current_duty_site` in MO/KS that aren't flagged. 
+```{r}
+arrests |> 
+  filter(!kc_duty_site &
+           (arrests$apprehension_state=="MISSOURI" | 
+               arrests$apprehension_state == "KANSAS")) |>
+  count(apprehension_state,toa_current_duty_site,apprehension_site_landmark)
+```
+
+There are a handful of duty sites outside of either state, but generally
+they all seem to be in non-KC areas of the states.
+
+### Flag State
+Based on the above, filtering to only include KS and MO arrests.
+
+```{r}
+arrests_moks <- arrests |> 
+  filter(apprehension_state=="MISSOURI" | apprehension_state == "KANSAS")
+
+```
+
+
+
+## Variable-Specific Checks
+With this filter in place, checking values in each location indicator column
+```{r}
+arrests_moks |> count(apprehension_site_landmark) |> arrange(desc(n))
+arrests_moks |> count(toa_current_duty_site) |> arrange(desc(n))
+
+```
+
+It looks like the initial `current_duty_site` flag captured relevant cases but it
+is now easier to see relevant `apprehension_site_landmark`.
+
+### Apprehension Site
+Note that this is based on manual data inspection and may need to be updated
+for future data releases.
+```{r}
+metro_keywords <- c("CLAY","JACKSON","DOUGLAS","LEAVENWORTH","GRANDVIEW",
+                    "INDEPENDENCE","JACKSON","JOHNSON","KANSAS CITY",
+                    "PLATTE","WYANDOTTE","CASS")
+arrests_moks <- arrests_moks |> 
+  mutate(kc_landmark=str_detect(apprehension_site_landmark,
+                                paste0(metro_keywords,collapse="|")) &
+  !(str_detect(apprehension_site_landmark,"JOHNSON") & 
+    apprehension_state=="MISSOURI") &
+  !(str_detect(apprehension_site_landmark,"JACKSON") & 
+           apprehension_state=="KANSAS")
+  )
+  
+
+
+```
+
+
+### Compare results
+Look at overlap/differences between the two indicators 
+```{r}
+paste("KC by landmark but not duty site:",
+sum(arrests_moks$kc_landmark & !arrests_moks$kc_duty_site,na.rm=TRUE)
+)
+
+paste("KC by duty site but not landmark:",
+sum(!arrests_moks$kc_landmark & arrests_moks$kc_duty_site,na.rm = TRUE)
+)
+
+paste("KC by both:",
+sum(arrests_moks$kc_landmark & arrests_moks$kc_duty_site,na.rm = TRUE)
+)
+
+paste("KC by neither:",
+sum(!arrests_moks$kc_landmark & !arrests_moks$kc_duty_site,na.rm = TRUE)
+)
+```
+
+#### KC Duty Site but not KC Landmark
+There are lots of values for duty site but not landmark in KC. Reviewing these.
+
+All results
+```{r}
+arrests_moks |> 
+  filter(kc_duty_site & !kc_landmark) |>
+  select(toa_current_duty_site,apprehension_site_landmark,
+         apprehension_state,apprehension_date,apprehension_method) 
+
+```
+
+
+Unique values of each variable
+```{r}
+# duty site
+arrests_moks |> 
+  filter(kc_duty_site & !kc_landmark) |>
+  count(toa_current_duty_site)
+
+# landmark
+arrests_moks |> 
+  filter(kc_duty_site & !kc_landmark) |>
+  count(apprehension_site_landmark) |>
+  arrange(desc(n))
+
+
+```
+
+The majority of the cases with initial disagreement have an `apprehension_site_landmark`
+of "KAN GENERAL AREA, NON-SPECIFIC". It's hard to say for sure, but seems plausible that
+these are in the KCMO area. It is noteworthy though that a notable number of records 
+are clearly marked with an `apprehension_site_landmark` in other areas
+
+#### KC Landmark but not KC Duty Site
+Also checking values for landmark in kc but duty site elsewhere (this is much rarer).
+
+All results
+```{r}
+arrests_moks |> 
+  filter(!kc_duty_site & kc_landmark) |>
+  select(toa_current_duty_site,apprehension_site_landmark,
+         apprehension_state,apprehension_date,apprehension_method) 
+```
+
+Unique values of each variable
+```{r}
+# duty site
+arrests_moks |> 
+  filter(!kc_duty_site & kc_landmark) |>
+  count(toa_current_duty_site)
+
+# landmark
+arrests_moks |> 
+  filter(!kc_duty_site & kc_landmark) |>
+  count(apprehension_site_landmark) |>
+  arrange(desc(n))
+
+```
+
+All of these seem to be outside of the KC metro and can probably be safely 
+excluded.
+
+## Final Assignment of KC Arrests
+
+Final logic:
+Consider as Kansas City if the `current_duty_site` indicates KCMO, unless the
+`apprehension_site_landmark` clearly indicates it is elsewhere. 
+
+For `apprehension_site_landmark` values of "KAN GENERAL AREA, NON-SPECIFIC", 
+consider as KCMO but add an `likely` flag. Unfortunately this does leave over
+half of the records as only "likely" so additional approaches should be taken to
+more clearly identify KC records.
+
+```{r}
+arrests_kc <- arrests_moks |>
+  filter(
+    (kc_duty_site & kc_landmark) |  
+      (kc_duty_site & 
+         (apprehension_site_landmark=="KAN GENERAL AREA, NON-SPECIFIC" |
+            is.na(apprehension_site_landmark)
+          )
+       )
+    ) |>
+  mutate(likely=(kc_duty_site & 
+    (apprehension_site_landmark=="KAN GENERAL AREA, NON-SPECIFIC" |
+       is.na(apprehension_site_landmark)
+      )
+  ))
+```
+
+```{r}
+paste("Total arrests flagged in KC:",nrow(arrests_kc))
+
+paste("Records with potential unclarity:",sum(arrests_kc$likely))
+```
+
+
+### Check `likely` flag
+Is there a trend in the increase in lack of certainty?
+```{r}
+arrests_kc <- arrests_kc |>
+  mutate(apprehension_month = floor_date(apprehension_date,unit="months")) 
+
+arrests_kc |>
+  ggplot(aes(x=apprehension_month,color=likely)) +
+  geom_line(stat="count")
+
+```
+
+The likely flag increases greatly post-Jan 25. Based on the fact that other data
+seems to be of lower quality in this time period, my suspicion is that this is 
+largely down to decreased data quality, leading to more generic values in
+`apprehension_site_landmark`.
+
+If this is the case, the KC dataset still may be an overestimate, but not
+necessarily dramatically so.
+
+
+### (not in use) Ever arrested in KC
+The below also adds arrests of indviduals who have ever been apprehended in KC.
+Not currently using it as it only adds a handful and is outside of focus at the moment.
+```{r}
+#kc_inds <- arrests_kc$unique_identifier
+#arrests_kc_ever <- arrests |>
+#  filter(unique_identifier %in% kc_inds)
+```
+
+### Export 
+```{r}
+write_parquet(arrests_kc,here("data/cleaned","arrests_kc.parquet"))
+```
+
