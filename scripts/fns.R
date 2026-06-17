@@ -88,14 +88,51 @@ make_age_bins <- function(df,col,age_bins=std_age_bins){
     )
 }
 
-comp_table <- function(df,var,by=post_0125_f,sort_by_var=FALSE){
+
+norm_months <- function(df){
+  # based on a dataframe with a post_0125_f column, divides `n` column
+  # by the number of months in dataset.
+  # only designed for use with `comp_table()`
+  
+  month_count <- data.frame(
+    post_0125_f=factor(
+      c("Before Jan 2025","After Jan 2025"),
+      levels=c("Before Jan 2025","After Jan 2025"),
+      ordered=TRUE),
+    n_months=c(28,13)
+  )
+  
+  df |>
+    left_join(month_count,by="post_0125_f") |>
+    mutate(n=round(n/n_months,1)) |>
+    select(-n_months)
+}
+
+
+comp_table <- function(df,var,by=post_0125_f,
+                       month_norm=TRUE,sort_by_var=FALSE,str_title=TRUE){
   # makes a table showing the counts of `var` pivoted by `by` 
   # if sort_by_var=TRUE, the table will be sorted by the values in var. 
   # Otherwise, it will sort by overall frequency
-  tbl <- df |>
-    count({{by}},{{var}}) |> 
+
+  if(str_title){  
+    tbl <- df |> 
+      mutate("{{var}}":=str_to_title({{var}})) |>
+      count({{by}},{{var}})
+  } else{
+    tbl <- df |> 
+      count({{by}},{{var}})
+  }
+  
+  if(month_norm){
+    tbl <- norm_months(tbl)
+  }
+  
+  tbl <- tbl |>
     arrange(desc(n)) |>
-    pivot_wider(names_from={{by}},values_from=n,values_fill = 0,
+    pivot_wider(names_from={{by}},
+                values_from=n,
+                values_fill = 0,
                 names_sort = TRUE)
   
   if(sort_by_var){
@@ -119,4 +156,36 @@ add_before_after_change <- function(df){
       (`After Jan 2025`-`Before Jan 2025`)/`Before Jan 2025`),
       1)
   )
+}
+
+pivot_for_plot <- function(df){
+  # convenience function to reshape the result of comp_table for easier plotting
+  df |>
+    pivot_longer(`Before Jan 2025`:`After Jan 2025`,names_to = "Period") |>
+    mutate(Period=factor(Period,levels=c("Before Jan 2025","After Jan 2025"),
+                         ordered=TRUE))
+}
+
+gt_defaults <- function(df,title,decimals=0){
+  # convenience function for table printing
+  tbl <- gt(df) |>
+    tab_header(title) |>
+    sub_values(
+      fn = function(x) is.na(x),
+      replacement = "-"
+    ) |>
+    sub_values(
+      fn = function(x) is.infinite(x),
+      replacement = "-"
+    ) |>
+    cols_align(align="left",columns=where(is.factor)) |>
+    cols_align(align="left",columns=where(is.character))  
+  
+  if("Percent Change" %in% names(df)){
+    tbl |> fmt_percent(columns = `Percent Change`,scale_values = FALSE,
+                decimals=decimals)
+      
+  } else{
+    tbl
+  }
 }
