@@ -2,13 +2,12 @@
 This is a repo for data exploration and analysis of immigration enforcement 
 data from the [Deportation Data Project](https://deportationdata.org/)[^1].
 
-Currently, repo contains analysis of:
+Currently, repo contains general cleaning and analysis of:
 * Apprehensions
 * Detention Stints
 * Detainers
 
-There is a general eploratory data analysis of these datasets as well as deeper analyses 
-with a focus on the Kansas City metro area. 
+There is also a more detailed analysis of [Kansas City Apprehensions](https://rpubs.com/djknaggs/ice-arrests-kc).
 
 ## Caveats
 While I have attempted to gain a reasonable understanding of the 
