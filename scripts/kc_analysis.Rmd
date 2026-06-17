@@ -1,43 +1,45 @@
 ---
-title: "KC Analysis-Overview"
-output: html_document
-date: "2026-04-04"
+title: "Kansas City ICE Apprehension Analysis"
+date: "June 2026"
+author: "Dylan Knaggs"
+output:
+  html_document:
+    toc: true
+    toc_depth: 4
+    toc_float: true
+    code_folding: hide  
 ---
 
-TO DO: Run everything with the likely flag
+The below document provides some quantitative insights into Immigration 
+and Customs Enforcement (ICE) activity within the Kansas City metro area between
+October 2022 and February 2026, particularly focusing on the changes seen during
+the current presidential administration.
 
-# High Level Analysis of ICE data in Kansas City
+Some key takeaways:
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
+* The overall rate of arrests has more than tripled during the current administration,
+with particularly high numbers during the summer of 2025 and February 2026.
+* Eighteen to twenty-one year-olds have experienced the largest increase in ICE arrests,
+with a 278% increase.
+* During the current administration, there have been particular peaks in ICE activity
+within communities on Tuesday and Wednesday from 8-10 AM.
+  - Note that this does not be mean that this will continue to be the case in the future.
+* Arrests do not seem targeted towards those with the most severe criminal background. 
+  - People convicted of aggravated felonies have seen the smallest increase in arrests.
+  - The groups with the largest increases are people convicted of 1-2 misdemeanors
+  and those with a criminal charge but no convictions. 
 
-NOTE: mark as preliminary due to lack of definitiveness in current duty site
+I would love to collaborate both with additional analysts and those who are 
+working on immigration issues. For questions and feedback, feel free to reach out at [dylan.knaggs@gmail.com](mailto:dylan.knaggs@gmail.com).
 
+All analysis is based on data provided in response to a FOIA request to the [Deportation Data Project](https://deportationdata.org/). Many thanks to them for making this data 
+and for making their work available to the public.
 
-High-level Plan
-1. Start with apprehension data and filter down based on toa_curent_duty_site
-  should compare with other indicators
-2. Left join on detention data
-3. Look at time/distance from apprehension to first detention location
-4. Start with detention data, and see who is booked into KC area facilities
-5. Check the overlap of this group with #2 
-(e.g. those with a first stay in KC but an apprehension elsewhere and vice versa)
-  See if documentation discusses why this could happen
-6. Replicate #3
-7. Perform other analyses flagged in scripts
-
-
-TODO:
-1. split out KC identification notebook
-Consider:
-2. create notebook for summary (demographics, timeline, apprehension types, day and hr trends)
-3. Create notebook for criminality
-4. Create notebook for tactics (apprehension types, day and hr trends)
-
-## Set up environment
-```{r,echo=FALSE}
+# Configuration
+```{r,collapse=TRUE,results='hide',message=FALSE,warning=FALSE}
 library(tidyverse)
+library(knitr)
+library(gt)
 library(ggrepel)
 library(here)
 library(arrow)
@@ -45,22 +47,43 @@ source("fns.R")
 ```
 
 Repeated plot elements
-```{r}
+```{r,collapse=TRUE,results='hide',message=FALSE,warning=FALSE}
 theme_set(theme_bw())
 inaug_line <- geom_vline(xintercept = as.Date("2025-01-20"), 
                          color="darkblue", size=.75)
 
-inaug_text <- annotate("text",label="Trump's Second Inauguration",
+add_inaug_text <- function(text_date=as.Date("2024-08-01")){
+  annotate("text",label="Trump's Second Inauguration",
+           x=text_date,y=180,size=3)  # top left
 #           x=as.Date("2025-06-28"),y=10,size=3) + # bottom right
-           x=as.Date("2024-08-01"),y=180,size=3)  # top left
+  
+}
+
+color_vec <- c("Before Jan 2025"="#E69A8D","After Jan 2025"="#5F4B8B")
+loc_color_vec <- c("Community"="salmon3","Prison/Jail"="palegreen4",
+                   "Others"="grey75")
+
 ```
 
 
-## Get Data
+## Load Data
+For simplicity in plotting and calculations, removing March 2026, which only
+has data for a few days.
+```{r,collapse=TRUE,results='hide',message=FALSE,warning=FALSE}
+arrests_kc <- read_parquet(here("data/cleaned","arrests_kc.parquet")) |>
+    filter(apprehension_month!=as.Date("2026-03-01")) 
+```
 
-```{r}
-arrests_kc <- read_parquet(here("data/cleaned","arrests_kc.parquet"))
-
+## Calculate repeated values
+```{r,collapse=TRUE,results='hide',message=FALSE,warning=FALSE}
+key_dates <- arrests_kc |> 
+  summarise(min=min(apprehension_date),max=max(apprehension_date))
+key_dates_admin <- arrests_kc |>
+  filter(post_0125) |>
+  summarise(min=min(apprehension_date),max=max(apprehension_date))
+first_date <- key_dates$min
+first_date_admin <- key_dates_admin$min
+last_date <- key_dates_admin$max
 ```
 
 
@@ -70,17 +93,28 @@ arrests_kc <- read_parquet(here("data/cleaned","arrests_kc.parquet"))
 
 ### Total Arrests
 
-```{r}
-# removing partial month of March 2026
+#### Before and after Trump II Inauguration
+
+The average number of arrests each month within the Kansas City area has more 
+than tripled from Oct 2022-Jan 2025 to 
+Feb 2025-Feb 2026.
+
+```{r,collapse=TRUE}
 arrests_kc |>
-  filter(apprehension_month!=as.Date("2026-03-01")) |>
+  mutate(n_arr=1) |>
+  comp_table(n_arr) |>
+  add_before_after_change() |>
+  select(-n_arr) |>
+  gt_defaults("Average Monthly Arrests",decimals=1)
+```
+
+
+#### Number of arrests over time
+```{r,collapse=TRUE}
+arrests_kc |>
   ggplot(aes(x=apprehension_month)) +
   inaug_line + 
-  inaug_text + 
-#  geom_vline(xintercept = as.Date("2025-01-20"), color="darkblue", size=.75) +
-#  annotate("text",label="Trump's Second Inauguration",
-#           x=as.Date("2025-06-28"),y=10,size=3) + # bottom right
-#           x=as.Date("2024-08-01"),y=180,size=3) + # top left
+  add_inaug_text() + 
   geom_line(stat="count") +
   geom_point(stat="count") +
   geom_text_repel(aes(label = after_stat(count)), 
@@ -92,103 +126,209 @@ arrests_kc |>
   ylim(0,NA)
 
 ```
+
 ### Demographics
 
-#### Place of Citizenship
-Apprehensions from citizens of most countries have increased at least somewhat 
-since Jan 2025, though there are some exceptions (e.g., Nicaragua and Cuba).
-Countries with the notably large increases include Honduras and Venezuela.
+#### Place of citizenship
 
-I don't know enough about changing immigration patterns and policies to know the
-exact causes of these changes.
+Citizens of Mexico have been apprehended more than any other country both before and after the second Trump inauguration. However, apprehensions from citizens of countries throughout the world have increased  since Jan 2025, though countries with the notably large increases 
+include Honduras, Guatemala, Venezuela, and El Salvador.
+
+
+```{r,collapse=TRUE}
+country_tbl <- arrests_kc |> 
+  comp_table(citizenship_region,month_norm=TRUE) |>
+  make_output_cols() 
+
+country_tbl |>
+  add_before_after_change() |>
+  head(15) |>
+  gt_defaults("Average Monthly Arrests by Country/Region of Citizenship") 
+```
 
 ```{r}
-arrests_kc |> 
-  comp_table(citizenship_region) |>
-  make_output_cols() |>
-  add_before_after_change()
+n <- 10
+country_tbl |>
+  head(10) |>
+  pivot_for_plot() |>
+  ggplot(aes(x=reorder(`Citizenship Region`,`value`,decreasing=FALSE),y=`value`,
+             label=signif(`value`,2),fill=`Period`)) +
+  geom_col(position="dodge",width=.7) +
+  scale_fill_manual(values=color_vec) +
+  geom_text(position = position_dodge(width = .7),vjust=-.3,size=2.75) +   
+  labs(
+    title="Average Monthly Arrests by Country of Citizenship",
+    subtitle=paste0(
+      "Kansas City Area, ",
+      format(first_date,"%b %Y"),"-",
+      format(last_date,"%b %Y"),"\n",
+      "Top ",n, " Countries with the Most Apprehensions"
+    ),
+    x="Citizenship Country",y="Average Monthly Arrests") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
 
 ```
 
-#### People Deported to Countries of which They Aren't Citizens   
+
+
+##### Deportations to third countries  
 For arrested individuals who are later deported, this table shows how many
-individuals were sent to different country than the one for which they have
+individuals were sent to a different country than the one for which they have
 citizenship.
 
-This is quite rare for Kansas City arrests, though it has increased since Jan 
+This is fairly uncommon for Kansas City arrests, though it has increased since Jan 
 2025, with Mexico being the most common departure country by far.
-```{r}
+```{r,collapse=TRUE}
 arrests_kc |>
+  mutate(
+    departure_country=str_to_title(departure_country),
+    citizenship_country=str_to_title(citizenship_country)
+  ) |>
   filter(!is.na(departure_country) & departure_country!=citizenship_country) |>
   filter(!post_0125) |>
   count(citizenship_country,departure_country,name="number_of_people") |>
   arrange(desc(number_of_people)) |>
-  make_output_cols()
+  make_output_cols() |>
+  gt() |>
+  tab_header("Arrests Leading to Departures to Third Countries (Oct 2022-Jan 2025)")
+```
 
+```{r,collapse=TRUE}
 arrests_kc |>
+  mutate(
+    departure_country=str_to_title(departure_country),
+    citizenship_country=str_to_title(citizenship_country)
+  ) |>
   filter(!is.na(departure_country) & departure_country!=citizenship_country) |>
   filter(post_0125) |>
   count(citizenship_country,departure_country,name="number_of_people") |>
   arrange(desc(number_of_people)) |>
-  make_output_cols()
+  make_output_cols() |>
+  gt() |>
+  tab_header("Arrests Leading to Departures to Third Countries (Feb 2025-Feb 2026)")
 
 ```
 
-#### Percent of Arrests by Age and Gender
+#### Age and gender
 
 Each column in this table shows the percent each age group makes up of all
-arrests within a gender. For example, 6-10 year olds make up 4.4% of all female
+arrests within a gender. For example, 6-10 year olds make up 4.5% of all female
 arrests.
 
 For both men and women, people in their 20s and 30s make up over half of all
 arrests.
-```{r}
+```{r,collapse=TRUE}
 arrests_kc |>
   count(age_bin,gender) |>
   pivot_wider(names_from=gender,values_from=n) |>
   column_percents() |>
   make_output_cols() |>
-  select(-`Unknown`)
+  select(-`Unknown`) |>
+  gt() |>
+  tab_header("Percent of Arrests by Age (Oct 2022-Feb 2026)") |>
+  sub_values(
+    fn = function(x) is.na(x),
+    replacement = "-"
+  ) |>  
+  fmt_percent(decimals = 1,scale_values = FALSE)
+
+
 ```
 
 
-This table shows changes in the number of arrests by age. Arrests of people under 
-18 have (maybe surprisingly) decreased since Jan 2025. However, 18-21 year olds
-are the age group with the largest increase. 
+The below table and chart show the change in the number of arrests by age. 
+Arrests of people under 18 have decreased since the end of January 2025. 
+However, apprehensions of 18-21 year olds have more than tripled, as have 
+arrests of those 50 and older.
+
+```{r,collapse=TRUE}
+age_tbl <- arrests_kc |>
+  comp_table(age_bin,sort_by_var = TRUE,str_title = FALSE) |>
+  make_output_cols() 
+
+age_tbl |>
+  add_before_after_change() |>
+  gt_defaults("Average Monthly Arrests by Age")
+```
+
+
+
 ```{r}
-arrests_kc |>
-  comp_table(age_bin,sort_by_var = TRUE) |>
-  make_output_cols() |>
-  add_before_after_change() 
+age_tbl |>
+  pivot_for_plot() |>
+  ggplot(aes(x=`Age Bin`,y=`value`,label=signif(`value`,2),fill=`Period`)) +
+  geom_col(position="dodge",width=.7) +
+  scale_fill_manual(values=color_vec) +
+  geom_text(position = position_dodge(width = .8),vjust=-.6,size=2.75) +   
+  labs(title="Average Monthly Arrests by Age",
+       subtitle=paste0(
+         "Kansas City Area, ",
+         format(first_date,"%b %Y"),"-",
+         format(last_date,"%b %Y")
+        ),
+       x="Age Bin",y="Average Monthly Arrests") 
 
 ```
 
-Looking at the number of arrests by gender shows that arrests of men have driven
-the increase since Jan 2025.
-```{r}
-arrests_kc |>
+
+Looking at the number of arrests by gender shows that both men and women are being 
+arrested at much higher rates, with a larger increase in arrests of men.
+```{r,collapse=TRUE}
+gender_tbl <- arrests_kc |>
   comp_table(gender,sort_by_var = TRUE) |>
-  make_output_cols() |>
-  add_before_after_change() 
+  make_output_cols() 
+
+gender_tbl |>
+  add_before_after_change() |>
+  gt_defaults("Average Monthly Arrests by Gender")
 
 ```
+
+```{r}
+gender_tbl |>
+  pivot_for_plot() |>
+  ggplot(aes(x=`Gender`,y=`value`,label=signif(`value`,2),fill=`Period`)) +
+  geom_col(position="dodge",width=.7) +
+  scale_fill_manual(values=color_vec) +
+  geom_text(position = position_dodge(width = .7),vjust=-.6,size=2.75) +   
+  labs(title="Average Monthly Arrests by Gender",
+       subtitle=paste0(
+         "Kansas City Area, ",
+         format(first_date,"%b %Y"),"-",
+         format(last_date,"%b %Y")
+        ),
+       x="Gender",y="Average Monthly Arrests") 
+
+```
+
 
 ## Apprehension Tactics
-### Places of Apprehensions
-Looking at all values of the `apprehension_method` column.
-```{r}
+### Locations
+There are a very large number of values in the `apprehension_method` column.
+```{r,collapse=TRUE}
 arrests_kc |> 
   count(apprehension_method) |> 
-  arrange(desc(n))
+  arrange(desc(n)) |>
+  rename(`Apprehension Method`=apprehension_method,`Number of Arrests`=n) |>
+  gt()
 
 ```
 
 
-Trying to group apprehension methods to get place information
-```{r}
+To simplify this, creating groups of apprehension methods to get easier-to-use place information. Per the Deportations Data Project [FAQ](https://deportationdata.org/docs/ice.html#faq)
+
+> ...there are two indicators that may be useful: in the arrests table when 
+“Apprehension Method” is “Located” or “Non-Custodial Arrest” we think that these 
+records are more likely to indicate arrests in the community.
+
+
+Based on this and other research, setting those values as community arrests, 
+[CAP Incarcerations](https://www.americanimmigrationcouncil.org/fact-sheet/criminal-alien-program-cap-immigration-enforcement-prisons-and-jails/) and custodial arrests as prison/jail arrests and creating an "Other" category for the rest.
+
+```{r,collapse=TRUE}
 arrests_kc <- arrests_kc |>
   mutate(
-    apprehension_summ = factor(
+    apprehension_location = factor(
       case_when(
         apprehension_method %in% c("LOCATED","NON-CUSTODIAL ARREST") ~ 
           "Community",
@@ -201,57 +341,95 @@ arrests_kc <- arrests_kc |>
     )
   )
   
-
 arrests_kc |>
-  count(apprehension_summ)
+  count(apprehension_location)
 
 ```
 
 
-```{r}
+Both community and prison/jail arrests have seen large increases since Jan 2025, 
+with the former occurring twice as often each month and the latter more than tripling.
+
+```{r,collapse=TRUE}
+
 arrests_kc |>
-  filter(apprehension_date!=as.Date("2026-02-01")) |>
-  ggplot(aes(x=apprehension_month,fill=apprehension_summ)) +
+  make_output_cols() |>
+  ggplot(aes(x=`Apprehension Month`,fill=`Apprehension Location`)) +
   geom_bar(stat="count") +
+  scale_fill_manual(values=loc_color_vec) +  
   inaug_line + 
-  inaug_text 
-  
-
+  add_inaug_text(as.Date("2024-06-03")) +
+  labs(title="Average Monthly Arrests by Location Type",
+       subtitle=paste0(
+         "Kansas City Area, ",
+         format(first_date,"%b %Y"),"-",
+         format(last_date,"%b %Y")
+        ),
+       y="Number of Apprehensions") +
+  scale_x_date(date_breaks = "6 months", date_labels =  "%b %y") +
+  ylim(0,NA)
 
 
 ```
 
-### Apprehension Programs
+```{r,collapse=TRUE}
+loc_tbl <- arrests_kc |>
+  comp_table(apprehension_location,sort_by_var = TRUE) |>
+  make_output_cols() 
 
-```{r}
-arrests_kc |>
-  count(post_0125_f,final_program) |>
-  arrange(desc(post_0125_f)) |>
-  pivot_wider(names_from=post_0125_f,values_from = n) |>
-  column_percents()
+loc_tbl |>
+  arrange(desc(`After Jan 2025`)) |>
+  add_before_after_change() |>
+  gt_defaults("Average Monthly Arrests by Location Type")
+
 ```
 
 
-### Days with the most apprehensions
-```{r}
+
+### Daily peaks
+Looking at arrests over time we can see that certain months have peaks in arrests,
+particularly arrests within the community. Breaking this out by specific days 
+shows that June 3rd - June 4th and June 25th, 2025 had the highest number of 
+community-based arrests, though August 2025 and February 2026 both have multiple days with at least 5 arrests.
+
+There are a handful of days prior to Feb 2026 with 5 or more arrests, though the 
+large majority have occurred during the current administration.
+
+
+```{r,collapse=TRUE}
 arrests_kc |>
+  filter(apprehension_location=="Community") |>
   count(apprehension_date) |>
-  arrange(desc(n))
+  filter(n>=5) |> 
+  arrange(desc(n)) |>
+  mutate(apprehension_date=format(apprehension_date,"%B %d, %Y")) |>
+  rename(`Apprehension Date`=apprehension_date,
+         `Number of Arrests`=n) |>
+  gt()
+
+  
 ```
 
 
-```{r}
+```{r,eval=FALSE, include = FALSE}
+#Reviewing the arrests from June 3rd and 4th, though there don't seem to be any obvious 
+#patterns.
+
 arrests_kc |>
+  filter(apprehension_location=="Community") |>
   filter(apprehension_date == as.Date("2025-06-03") | 
-           apprehension_date == as.Date("2025-06-04"))
+           apprehension_date == as.Date("2025-06-04")) |>
+  select(apprehension_state,apprehension_site_landmark,toa_current_duty_site,
+         final_program,apprehension_method,apprehension_criminality,
+         birth_year,age_bin,citizenship_country,gender) |>
+  make_output_cols() 
 ```
 
 
-### Trends by day of week and time of day
+### Daily and hourly trends
 
-Focusing on arrests within communities.
-
-```{r}
+Creating hourly bins for easier plotting.
+```{r,collapse=TRUE}
 
 hr_bins <- seq(0,23,2)
 hr_labs <- c(
@@ -285,56 +463,123 @@ arrests_kc <- arrests_kc |>
 
 ```
 
-TO DO:
-Title
-Theme (remove axis lines and maybe use something else)
-Note (caveat about not a prediction)
-Wrap legend title
 
-```{r}
-  arrests_kc |>
-  filter(apprehension_method %in% c("NON-CUSTODIAL ARREST","LOCATED")) |>
+The below chart focuses on arrests during the current administration. 
+While there have been arrests every day of the week and at most times throughout
+the day, there are clear patterns in ICE activity within communities. Most
+arrests occurring on weekday mornings, with particular peaks on Tuesday and
+Wednesday from 8-10 AM.
+
+Note that this chart provides a description of what arrest patterns _have_ been,
+and is not designed to predict the patterns that they _will_ follow in the 
+future.
+
+```{r,collapse=TRUE}
+arrests_kc |>
+  filter(apprehension_location=="Community") |>
   filter(post_0125) |>
   count(post_0125,apprehension_dow,apprehension_block) |>
   ggplot(aes(x=apprehension_dow,y=apprehension_block)) +
     geom_tile(aes(fill=n)) +
-    scale_fill_continuous(low="grey95",high="red") +
-    labs(x="Day of Week",y="Hour",fill="Number of Apprehensions") 
-  
-
+    geom_text(aes(label=n),size=2.75) +
+    scale_fill_continuous(low="grey90",high="red") +
+    labs(title="Number of Community Arrests by Day and Time",
+        subtitle=paste0(
+         "Community arrests within the Kansas City area, ",
+         format(first_date_admin,"%b %Y"),"-",
+         format(last_date,"%b %Y")
+        ),
+         x="Day of Week",y="Hour",
+         fill="Apprehensions") 
 
 ```
-
 
 
 
 ## Criminality
 
 ### Overall criminality
-Trend of arrests on people convicted of a crime
-```{r}
-arrests_kc |>
-  ggplot(aes(x=apprehension_month,fill=apprehension_criminality)) +
-  geom_bar(stat="count") 
+Looking at arrests based on whether people have been charged/convicted of a crime. 
+For this section, note that "Other Immigration Violator" indicates the person does not have any charges or convictions against them, per 
+the [Deportation Data Project Codebook](https://deportationdata.org/docs/ice/codebook.html).
 
+While all groups have seen increases in arrests, the number of arrests of people
+who have been charged with a crime but not yet convicted has skyrocketed.
+```{r,collapse=TRUE}
+crim_tbl <- arrests_kc |>
+  comp_table(apprehension_criminality,sort_by_var = TRUE) |>
+  make_output_cols() 
+
+crim_tbl |>
+  add_before_after_change() |>
+  gt_defaults("Average Monthly Arrests by Criminality")
 
 ```
 
-### Severity 
-For those convicted of a crime, severity of the crime by Case Threat Level. Per the Deportation Data Project,
-potentially based on criteria from a [2011 ICE Memo](https://www.ice.gov/doclib/news/releases/2011/110302washingtondc.pdf)
+
+```{r}
+crim_tbl |>
+  pivot_for_plot() |>
+  ggplot(aes(x=`Apprehension Criminality`,y=`value`,
+             label=signif(`value`,2),fill=`Period`)) +
+  geom_col(position="dodge",width=.7) +
+  scale_fill_manual(values=color_vec) +
+  geom_text(position = position_dodge(width = .7),vjust=-.6,size=2.75) +   
+  labs(title="Average Monthly Arrests by Criminality",
+       subtitle=paste0(
+         "Kansas City Area, ",
+         format(first_date,"%b %Y"),"-",
+         format(last_date,"%b %Y")
+        ),
+       x="Criminality",y="Average Monthly Arrests") 
+
+```
+
+
+Looking at this by month shows an immediate increase in the number of individuals
+arrested with pending criminal charges, the smallest group prior to the current 
+administration.
+
+This also shows some clear peaks in arrests of those with neither a criminal charge or conviction, similar to the peaks in community-based arrests shown in the previous section.
+```{r,collapse=TRUE}
+crim_color_vec <- c("1 Convicted Criminal"="lightcoral",
+                    "2 Pending Criminal Charges"="lightblue4",
+                    "3 Other Immigration Violator"="darkmagenta")
+
+arrests_kc |>
+  mutate(apprehension_criminality=str_to_title(apprehension_criminality)) |>
+  make_output_cols() |>
+  ggplot(aes(x=`Apprehension Month`,fill=`Apprehension Criminality`)) +
+  geom_bar(stat="count") +
+  scale_fill_manual(values=crim_color_vec) +  
+  inaug_line + 
+  add_inaug_text(as.Date("2024-05-20")) +
+  labs(title="Number of Apprehensions by Criminality",
+       subtitle=paste0(
+         "Kansas City Area, ",
+         format(first_date,"%b %Y"),"-",
+         format(last_date,"%b %Y")
+        ),
+       y="Number of Apprehensions") +
+  scale_x_date(date_breaks = "6 months", date_labels =  "%b %y") +
+  ylim(0,NA)
+
+```
+
+
+### Severity of crimes
+For those convicted of a crime, also looking at the severity of that crime, using 
+the `case_threat_level` variable. 
+
+Per the Deportation Data Project, this data is potentially based on criteria from a [2011 ICE Memo](https://www.ice.gov/doclib/news/releases/2011/110302washingtondc.pdf)
 
 * Level 1: Aggravated felony
 * Level 2: Felony or at least 3 misdemeanors
 * Level 3: Misdemeanors
 
-```{r}
-arrests_kc |> count(case_threat_level)
-```
 
-
-Combining criminality and severity 
-```{r}
+Creating a single variable to combine criminality and severity. 
+```{r,collapse=TRUE}
 crim_levels <- 5:0
 crim_labels <- c(
   "No Criminal Charges",
@@ -344,7 +589,6 @@ crim_labels <- c(
   "Conviction: Aggravated Felony",
   "Conviction: Unknown Severity"
 )
-
 
 arrests_kc <- arrests_kc |> 
   mutate(crim_summ=
@@ -358,7 +602,6 @@ arrests_kc <- arrests_kc |>
       TRUE ~ 0
     )
   )
-
 arrests_kc <- arrests_kc |>
   mutate(crim_summ=factor(crim_summ,levels = crim_levels,labels=crim_labels))
 
@@ -366,37 +609,12 @@ arrests_kc <- arrests_kc |>
 
 
 
+Breaking down arrests by threat level shows that those convicted of only 1-2 
+misdemeanors have seen much larger increases in arrests than those convicted of 
+more serious crimes. Meanwhile, those who are convicted of an aggravated felony 
+actually have the _smallest_ increase in number of arrests out of any group.
 
-```{r}
-arrests_kc |>
-  filter(!is.na(crim_summ)) |>
-  ggplot(aes(x=apprehension_month,fill=crim_summ)) +
-  geom_bar(stat="count")
-
-arrests_kc |>
-  filter(!is.na(crim_summ)) |>
-  ggplot(aes(x=apprehension_month,fill=crim_summ)) +
-  geom_bar(stat="count")
-
-```
-
-
-
-### Changes in current administration
-
-Criminality
-```{r}
-arrests_kc |>
-  count(post_0125,apprehension_criminality) |>
-  pivot_wider(names_from=post_0125,values_from=n) |>
-  column_percents()
-
-```
-
-
-Threat level
-```{r}
-
+```{r,collapse=TRUE}
 crim_levels <- 5:0
 crim_labels <- c(
   "No Criminal Charges",
@@ -407,7 +625,7 @@ crim_labels <- c(
   "Conviction: Unknown Severity"
 )
 
-arrests_kc |> 
+sev_tbl <- arrests_kc |>
   mutate(crim_summ=
     case_when(
       is.na(apprehension_criminality) ~ NA,
@@ -419,88 +637,36 @@ arrests_kc |>
       TRUE ~ 0
     )
   ) |>
-  mutate(crim_summ=factor(crim_summ,levels = crim_levels,labels=crim_labels)) |>
-  mutate(apprehension_month = floor_date(apprehension_date,unit="months")) |>
-  filter(!is.na(case_threat_level)) |>
-  count(post_0125,apprehension_month,crim_summ) |>
-  group_by(post_0125,crim_summ) |>
-  summarise(n_avg=mean(n)) |>
-  pivot_wider(names_from=post_0125,values_from=n_avg) |>
-  mutate(
-    change=`TRUE`-`FALSE`,
-    pct_change=100*(`TRUE`-`FALSE`)/`FALSE`
-  )
+  comp_table(crim_summ) |>
+  mutate(crim_summ=factor(crim_summ,levels=crim_levels,
+                          labels=crim_labels)) |>
+  arrange(crim_summ) |>
+  filter(crim_summ!="Conviction: Unknown Severity") |>
+  make_output_cols() 
 
-arrests_kc |> 
-  filter(!likely) |>
-  mutate(crim_summ=
-    case_when(
-      is.na(apprehension_criminality) ~ NA,
-      apprehension_criminality == "3 OTHER IMMIGRATION VIOLATOR" ~ 5,
-      apprehension_criminality == "2 PENDING CRIMINAL CHARGES" ~ 4,
-      case_threat_level==3 ~ 3,
-      case_threat_level==2 ~ 2,    
-      case_threat_level==1 ~ 1,
-      TRUE ~ 0
-    )
-  ) |>
-  mutate(crim_summ=factor(crim_summ,levels = crim_levels,labels=crim_labels)) |>
-  mutate(apprehension_month = floor_date(apprehension_date,unit="months")) |>
-  filter(!is.na(case_threat_level)) |>
-  count(post_0125,apprehension_month,crim_summ) |>
-  group_by(post_0125,crim_summ) |>
-  summarise(n_avg=mean(n)) |>
-  pivot_wider(names_from=post_0125,values_from=n_avg) |>
-  mutate(
-    change=`TRUE`-`FALSE`,
-    pct_change=100*(`TRUE`-`FALSE`)/`FALSE`
-  )
-  
+sev_tbl |>
+  add_before_after_change() |>
+  rename(`Criminality`=`Crim Summ`) |>
+  gt_defaults("Average Monthly Arrests by Criminality/Severity") 
 
-
-
-arrests_kc |> 
-  mutate(crim_summ=
-    case_when(
-      is.na(apprehension_criminality) ~ NA,
-      apprehension_criminality == "3 OTHER IMMIGRATION VIOLATOR" ~ 5,
-      apprehension_criminality == "2 PENDING CRIMINAL CHARGES" ~ 4,
-      case_threat_level==3 ~ 3,
-      case_threat_level==2 ~ 2,    
-      case_threat_level==1 ~ 1,
-      TRUE ~ 0
-    )
-  ) |>
-  mutate(crim_summ=factor(crim_summ,levels = crim_levels,labels=crim_labels)) |>
-  mutate(apprehension_month = floor_date(apprehension_date,unit="months")) |>
-  filter(!is.na(case_threat_level)) |>
-  count(post_0125_f,apprehension_month,crim_summ) |>
-  group_by(post_0125_F,crim_summ) |>
-  summarise(n_avg=mean(n)) |>
-  pivot_wider(names_from=post_0125,values_from=n_avg) |>
-  mutate(
-    change=`TRUE`-`FALSE`,
-    pct_change=100*(`TRUE`-`FALSE`)/`FALSE`
-  )
-  
-  
-
-```
-
-NOTE: huge increase in Criminal Charges, No Convictions could have something to do with the way
-KC cases are identified
-
-
-### Case Statuses
-```{r}
-arrests_kc |> 
-  count(case_status) 
 ```
 
 ```{r}
-arrests_kc |>
-  count(case_threat_level)
+sev_tbl |>
+  pivot_for_plot() |>
+  ggplot(aes(x=`Crim Summ`,y=`value`,
+             label=signif(`value`,2),fill=`Period`)) +
+  geom_col(position="dodge",width=.7) +
+  scale_fill_manual(values=color_vec) +
+  geom_text(position = position_dodge(width = .7),vjust=-.6,size=2.75) +   
+  scale_x_discrete(labels = scales::wrap_format(10)) + 
+  labs(title="Average Monthly Arrests by Criminality/Severity",
+       subtitle=paste0(
+         "Kansas City Area, ",
+         format(first_date,"%b %Y"),"-",
+         format(last_date,"%b %Y")
+        ),
+       x="Criminality/Severity",y="Average Monthly Arrests") 
 ```
-
 
 
